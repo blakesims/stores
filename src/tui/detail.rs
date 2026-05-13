@@ -4,7 +4,11 @@ use ratatui::text::Line;
 
 use super::app::App;
 use super::data::{
-    ArtifactPointer, CollapsedObsRow, IntakeRow, ObsRow, RecentEvent, ReviewRow, Row, TaskRow,
+    ArtifactPointer, CollapsedObsRow, CycleReviewGate, IntakeRow, ObsRow, PlanReviewGate,
+    RecentEvent, ReviewRow, Row, TaskCycleEntry, TaskRow,
+};
+use super::semantics::{
+    task_map_projection, MapCell, MapConfidence, MapGlyph, MapSource, TaskMapProjection,
 };
 
 fn truncate_sha(sha: Option<&str>) -> String {
@@ -92,6 +96,7 @@ fn task_lines(t: &TaskRow, app: &App) -> Vec<String> {
         ),
         format!("  cycle: {}", opt_i64(t.current_cycle)),
     ]);
+    append_task_map_decode(&mut lines, t);
     lines.extend([
         String::new(),
         "Blockers / held reasons".to_string(),
@@ -131,6 +136,182 @@ fn task_lines(t: &TaskRow, app: &App) -> Vec<String> {
     }
     append_task_debug_tuple(&mut lines, t);
     lines
+}
+
+fn append_task_map_decode(lines: &mut Vec<String>, t: &TaskRow) {
+    let projection = task_map_projection(t);
+    lines.extend([String::new(), "Task map".to_string()]);
+    lines.push(format!(
+        "  planning: {} attempts={} latest_gate={} source={} confidence={}{}",
+        map_cell_label(&projection.planning),
+        t.plan_review_entries.len(),
+        latest_plan_gate(t),
+        map_source_label(&projection.planning.source),
+        map_confidence_label(projection.planning.confidence),
+        active_marker(&projection.planning),
+    ));
+    lines.push(format!(
+        "  plan_review: gate={} source={} confidence={}",
+        latest_plan_gate(t),
+        plan_review_source_label(t, &projection.planning),
+        map_confidence_label(projection.planning.confidence)
+    ));
+    if projection.phases.is_empty() {
+        lines.push("  phases: —".to_string());
+    } else {
+        for (idx, cell) in projection.phases.iter().enumerate() {
+            let phase = (idx + 1) as i64;
+            lines.push(format!(
+                "  phase {phase}: {} cycle={} gate={} source={} confidence={}{}",
+                map_cell_label(cell),
+                opt_i64(cell.cycle),
+                latest_cycle_gate_for_phase(t, phase),
+                map_source_label(&cell.source),
+                map_confidence_label(cell.confidence),
+                active_marker(cell),
+            ));
+        }
+    }
+    if let Some(wrap) = projection.wrap.as_ref() {
+        lines.push(format!(
+            "  wrap: {} source={} confidence={}{}",
+            map_cell_label(wrap),
+            map_source_label(&wrap.source),
+            map_confidence_label(wrap.confidence),
+            active_marker(wrap),
+        ));
+    }
+    append_task_map_fallback(lines, &projection);
+    lines.push(format!(
+        "  projection_confidence: {}",
+        map_confidence_label(projection.confidence)
+    ));
+}
+
+fn append_task_map_fallback(lines: &mut Vec<String>, projection: &TaskMapProjection) {
+    let Some(fallback) = projection.fallback.as_ref() else {
+        if projection.reason.is_some() {
+            lines.push(format!(
+                "  reason: {} source=unknown confidence=unknown",
+                present_opt(projection.reason.as_deref())
+            ));
+        }
+        return;
+    };
+    lines.push(format!(
+        "  fallback: {} reason={} source={} confidence={}",
+        map_cell_label(fallback),
+        present_opt(projection.reason.as_deref()),
+        map_source_label(&fallback.source),
+        map_confidence_label(fallback.confidence)
+    ));
+}
+
+fn map_cell_label(cell: &MapCell) -> String {
+    let mut label = map_glyph_label(cell.glyph).to_string();
+    label.push(' ');
+    label.push_str(cell.glyph.symbol());
+    if let Some(cycle) = cell.cycle {
+        label.push_str(&format!(" cycle {cycle}"));
+    }
+    label
+}
+
+fn latest_plan_gate(t: &TaskRow) -> String {
+    t.plan_review_entries
+        .last()
+        .map(|entry| plan_gate_label(&entry.gate).to_string())
+        .unwrap_or_else(|| "—".to_string())
+}
+
+fn plan_review_source_label(t: &TaskRow, planning: &MapCell) -> &'static str {
+    if t.plan_review_entries.is_empty() {
+        map_source_label(&planning.source)
+    } else {
+        "plan_review_log"
+    }
+}
+
+fn latest_cycle_gate_for_phase(t: &TaskRow, phase: i64) -> String {
+    latest_cycle_for_phase(t, phase)
+        .and_then(|entry| entry.review_gate.as_ref())
+        .map(cycle_gate_label)
+        .unwrap_or("—")
+        .to_string()
+}
+
+fn latest_cycle_for_phase(t: &TaskRow, phase: i64) -> Option<&TaskCycleEntry> {
+    t.cycle_entries
+        .iter()
+        .filter(|entry| entry.phase == phase && entry.cycle > 0)
+        .max_by_key(|entry| entry.cycle)
+}
+
+fn plan_gate_label(gate: &PlanReviewGate) -> &str {
+    match gate {
+        PlanReviewGate::Ready => "READY",
+        PlanReviewGate::NeedsWork => "NEEDS_WORK",
+        PlanReviewGate::NotReady => "NOT_READY",
+        PlanReviewGate::Unknown(value) if value.trim().is_empty() => "UNKNOWN",
+        PlanReviewGate::Unknown(value) => value.as_str(),
+    }
+}
+
+fn cycle_gate_label(gate: &CycleReviewGate) -> &str {
+    match gate {
+        CycleReviewGate::Pass => "PASS",
+        CycleReviewGate::Revise => "REVISE",
+        CycleReviewGate::Fail => "FAIL",
+        CycleReviewGate::Unknown(value) if value.trim().is_empty() => "UNKNOWN",
+        CycleReviewGate::Unknown(value) => value.as_str(),
+    }
+}
+
+fn map_glyph_label(glyph: MapGlyph) -> &'static str {
+    match glyph {
+        MapGlyph::Queued => "queued",
+        MapGlyph::Planning => "planning",
+        MapGlyph::PlanReview => "plan-review",
+        MapGlyph::UnreachedPhase => "unreached",
+        MapGlyph::Executing => "executing",
+        MapGlyph::CodeReview => "code-review",
+        MapGlyph::Wrap => "wrap",
+        MapGlyph::Waiting => "waiting",
+        MapGlyph::Fault => "fault",
+        MapGlyph::Unknown => "unknown",
+    }
+}
+
+fn map_source_label(source: &MapSource) -> &'static str {
+    match source {
+        MapSource::Lifecycle => "lifecycle",
+        MapSource::ActiveStep => "active_step",
+        MapSource::ActiveStepAndPlanReviewLog => "active_step+plan_review_log",
+        MapSource::CurrentPhaseCycle => "current_phase/current_cycle",
+        MapSource::TotalPhases => "total_phases",
+        MapSource::PlanReviewLog => "plan_review_log",
+        MapSource::Cycles => "cycles",
+        MapSource::PlanSource => "plan",
+        MapSource::Blocker => "blocker",
+        MapSource::TerminalLifecycle => "terminal_lifecycle",
+        MapSource::MissingEvidence => "missing_evidence",
+    }
+}
+
+fn map_confidence_label(confidence: MapConfidence) -> &'static str {
+    match confidence {
+        MapConfidence::Exact => "exact",
+        MapConfidence::Implied => "implied",
+        MapConfidence::Unknown => "unknown",
+    }
+}
+
+fn active_marker(cell: &MapCell) -> &'static str {
+    if cell.active {
+        " active"
+    } else {
+        ""
+    }
 }
 
 fn append_live_runner(lines: &mut Vec<String>, t: &TaskRow) {
@@ -662,7 +843,10 @@ fn list_or_dash(items: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::tui::app::{App, TuiOpts};
-    use crate::tui::data::{AgentRunsRoleAggregate, DaemonStartRow, DispatchLockRow, EngineDetail};
+    use crate::tui::data::{
+        AgentRunsRoleAggregate, CycleReviewGate, DaemonStartRow, DispatchLockRow, EngineDetail,
+        PlanReviewGate, TaskCycleEntry, TaskPlanReviewEntry,
+    };
 
     #[test]
     fn task_detail_contains_required_headings() {
@@ -705,6 +889,85 @@ mod tests {
         assert!(
             state_idx < debug_idx,
             "semantic state must precede debug: {text}"
+        );
+    }
+
+    #[test]
+    fn task_detail_decodes_task_map_sources_gates_confidence_and_fallback() {
+        let app = App::new(TuiOpts::default());
+        let row = Row::Task(TaskRow {
+            display_id: "T902".to_string(),
+            status: "blocked".to_string(),
+            title: "map decode".to_string(),
+            lifecycle: Some("active".to_string()),
+            active_step: Some("coding".to_string()),
+            current_phase: Some(2),
+            current_cycle: Some(2),
+            total_phases: Some(3),
+            blocked: Some(true),
+            blocker_kind: Some("runner".to_string()),
+            plan_review_entries: vec![
+                TaskPlanReviewEntry {
+                    gate: PlanReviewGate::NeedsWork,
+                    ..Default::default()
+                },
+                TaskPlanReviewEntry {
+                    gate: PlanReviewGate::Ready,
+                    ..Default::default()
+                },
+            ],
+            cycle_entries: vec![
+                TaskCycleEntry {
+                    phase: 1,
+                    cycle: 1,
+                    review_gate: Some(CycleReviewGate::Pass),
+                    ..Default::default()
+                },
+                TaskCycleEntry {
+                    phase: 2,
+                    cycle: 1,
+                    review_gate: Some(CycleReviewGate::Revise),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let text = render_text_for_row(&row, &app);
+        for needle in [
+            "Task map",
+            "planning: plan-review ● cycle 2 attempts=2 latest_gate=READY source=plan_review_log confidence=exact",
+            "plan_review: gate=READY source=plan_review_log confidence=exact",
+            "phase 1: code-review ▣ cycle=— gate=PASS source=cycles confidence=exact",
+            "phase 2: executing □ cycle 2 cycle=2 gate=REVISE source=current_phase/current_cycle confidence=exact active",
+            "phase 3: unreached · cycle=— gate=— source=total_phases confidence=exact",
+            "fallback: fault ▲ reason=runner source=blocker confidence=exact",
+            "projection_confidence: exact",
+        ] {
+            assert!(text.contains(needle), "missing {needle}: {text}");
+        }
+    }
+
+    #[test]
+    fn task_detail_marks_unknown_task_map_evidence() {
+        let app = App::new(TuiOpts::default());
+        let row = Row::Task(TaskRow {
+            display_id: "T903".to_string(),
+            status: "executing".to_string(),
+            title: "unknown map".to_string(),
+            lifecycle: Some("active".to_string()),
+            active_step: Some("coding".to_string()),
+            ..Default::default()
+        });
+        let text = render_text_for_row(&row, &app);
+        assert!(
+            text.contains(
+                "phase 1: unknown ? cycle=— gate=— source=missing_evidence confidence=unknown"
+            ),
+            "missing unknown marker: {text}"
+        );
+        assert!(
+            text.contains("projection_confidence: unknown"),
+            "missing projection unknown: {text}"
         );
     }
 

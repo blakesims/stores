@@ -2586,6 +2586,134 @@ mod tests {
     }
 
     #[test]
+    fn task_focused_table_applies_map_role_styles_to_rendered_cells() {
+        let mut app = App::new(TuiOpts::default());
+        app.rows = vec![
+            Row::Task(TaskRow {
+                display_id: "T401".to_string(),
+                status: "executing".to_string(),
+                title: "active coding".to_string(),
+                lifecycle: Some("active".to_string()),
+                active_step: Some("coding".to_string()),
+                current_phase: Some(2),
+                current_cycle: Some(2),
+                total_phases: Some(3),
+                plan_review_entries: vec![TaskPlanReviewEntry {
+                    gate: PlanReviewGate::Ready,
+                    ..Default::default()
+                }],
+                cycle_entries: vec![TaskCycleEntry {
+                    phase: 1,
+                    cycle: 1,
+                    review_gate: Some(CycleReviewGate::Pass),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                display_id: "T402".to_string(),
+                status: "executing".to_string(),
+                title: "active review".to_string(),
+                lifecycle: Some("active".to_string()),
+                active_step: Some("coding_review".to_string()),
+                current_phase: Some(1),
+                current_cycle: Some(1),
+                total_phases: Some(1),
+                plan_review_entries: vec![TaskPlanReviewEntry {
+                    gate: PlanReviewGate::Ready,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                display_id: "T403".to_string(),
+                status: "executing".to_string(),
+                title: "failed review".to_string(),
+                lifecycle: Some("active".to_string()),
+                total_phases: Some(1),
+                plan_review_entries: vec![TaskPlanReviewEntry {
+                    gate: PlanReviewGate::Ready,
+                    ..Default::default()
+                }],
+                cycle_entries: vec![TaskCycleEntry {
+                    phase: 1,
+                    cycle: 1,
+                    review_gate: Some(CycleReviewGate::Fail),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                display_id: "T404".to_string(),
+                status: "blocked".to_string(),
+                title: "capacity wait".to_string(),
+                blocked: Some(true),
+                blocker_kind: Some("capacity".to_string()),
+                ..Default::default()
+            }),
+            Row::Task(TaskRow {
+                display_id: "T405".to_string(),
+                status: "executing".to_string(),
+                title: "unknown phase".to_string(),
+                lifecycle: Some("active".to_string()),
+                active_step: Some("coding".to_string()),
+                ..Default::default()
+            }),
+        ];
+        app.sections = classify(&app.rows);
+        app.apply_sort();
+        app.viewport_height = 20;
+
+        let backend = TestBackend::new(140, 14);
+        let mut terminal = Terminal::new(backend).expect("test backend");
+        terminal
+            .draw(|f| draw_focused_table(f, &app, f.area()))
+            .expect("draw focused table");
+        let buf = terminal.backend().buffer().clone();
+        let painted = buffer_to_string(&buf);
+
+        let row_y = |id: &str| -> u16 {
+            for y in 0..buf.area.height {
+                let mut line = String::new();
+                for x in 0..buf.area.width {
+                    line.push_str(buf[(x, y)].symbol());
+                }
+                if line.contains(id) {
+                    return y;
+                }
+            }
+            panic!("missing row {id}:\n{painted}");
+        };
+        let cell_on_row = |y: u16, symbol: &str, nth: usize| -> ratatui::buffer::Cell {
+            let mut seen = 0;
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol() == symbol {
+                    if seen == nth {
+                        return buf[(x, y)].clone();
+                    }
+                    seen += 1;
+                }
+            }
+            panic!("missing cell {symbol:?} #{nth} on row {y}:\n{painted}");
+        };
+
+        let active_y = row_y("T401");
+        assert_eq!(cell_on_row(active_y, "●", 0).fg, WATCH_GREEN);
+        assert_eq!(cell_on_row(active_y, "▣", 0).fg, WATCH_GREEN);
+        let active_work = cell_on_row(active_y, "□", 0);
+        assert_eq!(active_work.fg, Color::Cyan);
+        assert!(active_work.modifier.contains(Modifier::BOLD));
+        assert_eq!(cell_on_row(active_y, "·", 0).fg, WATCH_OVERLAY0);
+
+        let review_cell = cell_on_row(row_y("T402"), "▣", 0);
+        assert_eq!(review_cell.fg, WATCH_YELLOW);
+        assert!(review_cell.modifier.contains(Modifier::BOLD));
+        assert_eq!(cell_on_row(row_y("T403"), "▣", 0).fg, WATCH_RED);
+        assert_eq!(cell_on_row(row_y("T404"), "△", 0).fg, WATCH_PEACH);
+        assert_eq!(cell_on_row(row_y("T405"), "?", 0).fg, WATCH_OVERLAY2);
+    }
+
+    #[test]
     fn observation_projection_row_labels_suppress_broad_group_context_and_raw_schema() {
         let candidate = ObsRow {
             display_id: "L301".to_string(),
