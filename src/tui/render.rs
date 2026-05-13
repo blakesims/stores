@@ -36,12 +36,12 @@ const WATCH_YELLOW: Color = Color::Rgb(0xf9, 0xe2, 0xaf);
 const WATCH_PEACH: Color = Color::Rgb(0xfa, 0xb3, 0x87);
 const WATCH_RED: Color = Color::Rgb(0xf3, 0x8b, 0xa8);
 
-// Five-card mode uses a 3-column grid inside each bordered card. The longest
-// top-card label word is "investigate" (11 columns); non-first grid cells lose
-// one column to the vertical separator, so each raw column must be at least 12
-// columns wide. With borders, 36 inner columns + 2 borders = 38.
-const MIN_STORE_CARD_LABEL_WORD_WIDTH: u16 = 11;
-const MIN_STORE_CARD_WIDTH: u16 = (MIN_STORE_CARD_LABEL_WORD_WIDTH + 1) * 3 + 2;
+// Five-card mode uses lane-specific minimum widths. The previous single
+// worst-case width made fullscreen-ish terminals collapse to one focused card
+// even though most lanes have much shorter labels. Compute the minimum from the
+// actual six slots so all cards appear as soon as each lane can keep full words
+// readable.
+const MIN_STORE_CARD_TITLE_PADDING: u16 = 4;
 
 /// Height (in rows) of the bottom chrome painted below the focused-table
 /// region: recent-exhaust strip (1) + hint line (1) + status bar (1) = 3.
@@ -259,17 +259,20 @@ fn draw_store_strip(f: &mut Frame, app: &App, area: Rect) {
         &app.status_bar.daemon_liveness,
         &app.external_review,
     );
-    if area.width / StoreLane::ALL.len() as u16 >= MIN_STORE_CARD_WIDTH {
+    let min_widths = lane_min_card_widths(&model);
+    let all_cards_min_width: u16 = min_widths.iter().sum();
+    if area.width >= all_cards_min_width {
+        let widths = distribute_store_card_widths(area.width, min_widths);
         let cells = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Ratio(1, 5); 5])
+            .constraints(widths.map(Constraint::Length))
             .split(area);
         for (i, lane) in StoreLane::ALL.iter().enumerate() {
             draw_store_card(f, *lane, app.focused_store == *lane, &model, cells[i]);
         }
     } else {
-        let more_width =
-            STORE_STRIP_MORE_WIDTH.min(area.width.saturating_sub(MIN_STORE_CARD_WIDTH));
+        let focused_min_width = lane_min_card_width(app.focused_store, &model);
+        let more_width = STORE_STRIP_MORE_WIDTH.min(area.width.saturating_sub(focused_min_width));
         let focused_width = area.width.saturating_sub(more_width);
         let cells = Layout::default()
             .direction(Direction::Horizontal)
@@ -281,6 +284,44 @@ fn draw_store_strip(f: &mut Frame, app: &App, area: Rect) {
         draw_store_card(f, app.focused_store, true, &model, cells[0]);
         draw_store_more_affordance(f, app.focused_store, cells[1]);
     }
+}
+
+fn lane_min_card_widths(model: &StoreFlowModel) -> [u16; 5] {
+    StoreLane::ALL.map(|lane| lane_min_card_width(lane, model))
+}
+
+fn lane_min_card_width(lane: StoreLane, model: &StoreFlowModel) -> u16 {
+    let slots = lane_card_slots(lane, model);
+    let mut col_widths = [1_u16; 3];
+    for (idx, slot) in slots.iter().enumerate() {
+        let col = idx % 3;
+        col_widths[col] = col_widths[col].max(slot_min_cell_width(*slot));
+    }
+    // Non-first cells lose one display column to the vertical separator.
+    let inner = col_widths[0] + (col_widths[1] + 1) + (col_widths[2] + 1);
+    let title = lane.label().chars().count() as u16 + MIN_STORE_CARD_TITLE_PADDING;
+    inner.saturating_add(2).max(title)
+}
+
+fn slot_min_cell_width(slot: FlowSlot) -> u16 {
+    let label_word = slot
+        .label
+        .split_whitespace()
+        .map(|word| word.chars().count() as u16)
+        .max()
+        .unwrap_or(1);
+    label_word.max(slot.meta().chars().count() as u16)
+}
+
+fn distribute_store_card_widths(total_width: u16, mut widths: [u16; 5]) -> [u16; 5] {
+    let mut extra = total_width.saturating_sub(widths.iter().sum());
+    let mut idx = 0;
+    while extra > 0 {
+        widths[idx] = widths[idx].saturating_add(1);
+        extra -= 1;
+        idx = (idx + 1) % widths.len();
+    }
+    widths
 }
 
 fn draw_store_more_affordance(f: &mut Frame, focused: StoreLane, area: Rect) {
@@ -357,7 +398,7 @@ fn draw_store_card(
         width: area.width.saturating_sub(2),
         height: area.height.saturating_sub(2),
     };
-    let col_widths = split_three_widths(inner.width);
+    let col_widths = split_store_card_widths(lane, model, inner.width);
     let col_starts = [
         inner.x,
         inner.x + col_widths[0],
@@ -636,10 +677,31 @@ fn lane_card_slots(lane: StoreLane, model: &StoreFlowModel) -> [FlowSlot; 6] {
     }
 }
 
-fn split_three_widths(width: u16) -> [u16; 3] {
-    let base = width / 3;
-    let rem = width % 3;
-    [base + u16::from(rem > 0), base + u16::from(rem > 1), base]
+fn split_store_card_widths(lane: StoreLane, model: &StoreFlowModel, width: u16) -> [u16; 3] {
+    let slots = lane_card_slots(lane, model);
+    let mut widths = [1_u16; 3];
+    for (idx, slot) in slots.iter().enumerate() {
+        let col = idx % 3;
+        widths[col] = widths[col].max(slot_min_cell_width(*slot) + u16::from(col > 0));
+    }
+    distribute_three_widths(width, widths)
+}
+
+fn distribute_three_widths(total_width: u16, mut widths: [u16; 3]) -> [u16; 3] {
+    let min_total: u16 = widths.iter().sum();
+    if total_width < min_total {
+        let base = total_width / 3;
+        let rem = total_width % 3;
+        return [base + u16::from(rem > 0), base + u16::from(rem > 1), base];
+    }
+    let mut extra = total_width - min_total;
+    let mut idx = 0;
+    while extra > 0 {
+        widths[idx] = widths[idx].saturating_add(1);
+        extra -= 1;
+        idx = (idx + 1) % widths.len();
+    }
+    widths
 }
 
 fn set_clipped(
@@ -2308,7 +2370,7 @@ mod tests {
     #[test]
     fn cockpit_top_strip_paints_all_five_lane_labels_at_readable_width() {
         let mut app = cockpit_fixture_app();
-        let buf = paint(&mut app, 200, 30);
+        let buf = paint(&mut app, 140, 30);
         let painted = buffer_to_string(&buf);
         // Top region is the card strip.
         let top_region: String = painted
@@ -2328,7 +2390,8 @@ mod tests {
             "gate",
             "working",
             "waiting",
-            "tool fault",
+            "tool",
+            "fault",
         ] {
             assert!(
                 top_region.contains(label),

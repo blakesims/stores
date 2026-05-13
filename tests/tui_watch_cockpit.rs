@@ -319,26 +319,24 @@ fn cockpit_top_strip_paints_all_five_lane_labels_with_counts() {
         );
     }
 
-    // (i) Shared-flow top cards expose canonical glyph slots with fixture counts.
+    // (i) Shared-flow top cards expose readable full-word labels and separated counts.
     for expected in [
-        "◌new1",   // intake draft
-        "◆tri0",   // intake triage
-        "◌cand1",  // observation open
-        "◆inv0",   // observation investigation
-        "◌q0",     // no primary-lifecycle queued task
-        "◆wrk2",   // ready + executing legacy active work
-        "◇g0",     // no task review/integration gate
-        "✓dn1",    // one terminal task
-        "△w0",     // no task wait
-        "▲f0",     // no task failure
-        "◆run1",   // external review running
-        "▲tool0",  // no external review tool fault
-        "◇lock1",  // one dangling dispatch lock
-        "▲daemon", // deterministic dead daemon
+        "◌ 1", "new",      // intake draft
+        "◆ 0", "triage",   // intake triage / observation investigation zeroes
+        "candidates",       // observation open, not `cand`
+        "queued", "working", "gate", "done", "waiting", "failed",
+        "running", "tool", "fault",
+        "locks", "daemon", "down",
     ] {
         assert!(
             top.contains(expected),
-            "top region missing shared-flow slot {expected:?}:\n{top}\n\nfull paint:\n{painted}"
+            "top region missing readable shared-flow token {expected:?}:\n{top}\n\nfull paint:\n{painted}"
+        );
+    }
+    for obsolete in ["◌new", "◆tri", "◌cand", "◆inv", "◌q", "◆wrk", "✓dn", "△w", "▲f", "▲tool"] {
+        assert!(
+            !top.contains(obsolete),
+            "top region must not return to compact cockpit code {obsolete:?}:\n{top}"
         );
     }
 }
