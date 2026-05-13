@@ -13,7 +13,10 @@ use super::data::{
     cockpit_model, recent_exhaust, store_flow_model, ExternalReviewState, Row, Section,
     StoreFlowModel, StoreLane,
 };
-use super::semantics::{engine_presentation, task_presentation, PresentationSeverity};
+use super::semantics::{
+    engine_presentation, external_review_presentation, external_review_runner_label,
+    intake_presentation, observation_presentation, task_presentation, PresentationSeverity,
+};
 
 /// Height (in rows) of the cockpit's top store-flow strip (5 cards drawn
 /// inside a bordered block ⇒ 5 lines: top border + 3 body rows + bottom
@@ -763,17 +766,10 @@ fn format_obs_line(
     o: &super::data::ObsRow,
     collapsed: Option<&super::data::CollapsedObsRow>,
 ) -> Vec<Span<'static>> {
-    // ADR 0002 compatibility-only T148 task 6.1: raw observation.status is rendered
-    // only as a legacy label; lifecycle/contract/waiting drive section placement.
-    let status = if o.status == "investigation_failed" {
-        match o.investigation_failure_reason.as_deref() {
-            Some(reason) if !reason.trim().is_empty() => {
-                format!("investigation_failed:{}", truncate(reason.trim(), 40))
-            }
-            _ => "investigation_failed:unknown".to_string(),
-        }
-    } else {
-        o.status.clone()
+    let presentation = observation_presentation(o);
+    let status = match presentation.signal {
+        Some(signal) => format!("{} {} {}", presentation.glyph, presentation.label, signal),
+        None => format!("{} {}", presentation.glyph, presentation.label),
     };
     let (display_id, badge, summary_prefix) = collapsed
         .map(|c| {
@@ -842,9 +838,8 @@ fn format_intake_line(i: &super::data::IntakeRow) -> Vec<Span<'static>> {
             format!("{:<6}", i.display_id),
             Style::default().fg(Color::Green),
         ),
-        // ADR 0002 compatibility-only T148 task 6.1: raw intake.status label.
         Span::styled(
-            format!("{:<24}", i.status),
+            format!("{:<24}", intake_status_label(i)),
             Style::default().fg(Color::Yellow),
         ),
         Span::raw(" "),
@@ -874,7 +869,8 @@ fn format_review_line(r: &super::data::ReviewRow) -> Vec<Span<'static>> {
     let held = r
         .held_reason
         .as_deref()
-        .filter(|s| !s.is_empty())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "none")
         .map(|h| format!("held:{h} "));
     let age = age_label(
         r.started_at
@@ -887,20 +883,15 @@ fn format_review_line(r: &super::data::ReviewRow) -> Vec<Span<'static>> {
         .as_deref()
         .filter(|s| s.len() >= 7)
         .map(|s| format!("sha:{} ", &s[..7]));
-    let runner = if r.runner.is_empty() {
-        "unknown"
-    } else {
-        r.runner.as_str()
-    };
+    let runner = external_review_runner_label(r);
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(
             format!("{:<6}", r.display_id),
             Style::default().fg(Color::Cyan),
         ),
-        // ADR 0002 compatibility-only T148 task 6.1: raw architecture review.status label.
         Span::styled(
-            format!("{:<24}", format!("review:{}", r.status)),
+            format!("{:<24}", review_status_label(r)),
             Style::default().fg(Color::Yellow),
         ),
         Span::raw(" "),
@@ -923,6 +914,18 @@ fn format_review_line(r: &super::data::ReviewRow) -> Vec<Span<'static>> {
 
 fn task_status_label(t: &super::data::TaskRow) -> String {
     let presentation = task_presentation(t);
+    presentation_label(presentation)
+}
+
+fn intake_status_label(i: &super::data::IntakeRow) -> String {
+    presentation_label(intake_presentation(i))
+}
+
+fn review_status_label(r: &super::data::ReviewRow) -> String {
+    presentation_label(external_review_presentation(r))
+}
+
+fn presentation_label(presentation: super::semantics::Presentation) -> String {
     match presentation.signal {
         Some(signal) => format!("{} {} {}", presentation.glyph, presentation.label, signal),
         None => format!("{} {}", presentation.glyph, presentation.label),
@@ -1056,7 +1059,7 @@ mod tests {
     use super::*;
     use crate::tui::app::{App, StatusBar, TuiOpts};
     use crate::tui::daemon::Liveness;
-    use crate::tui::data::{IntakeRow, ObsRow, Row, SystemHealth, TaskRow};
+    use crate::tui::data::{IntakeRow, ObsRow, ReviewRow, Row, SystemHealth, TaskRow};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -1384,7 +1387,7 @@ mod tests {
             false,
             &ExternalReviewState::default(),
         ));
-        assert!(text.contains("investigation_failed:rate_limit"), "{text}");
+        assert!(text.contains("addressed"), "{text}");
         assert!(text.contains("investigator failed"), "{text}");
     }
 
@@ -1709,7 +1712,7 @@ mod tests {
 
     // ----- Phase 3 cockpit-render tests -------------------------------------
 
-    use crate::tui::data::{classify, ReviewRow, StoreLane};
+    use crate::tui::data::{classify, StoreLane};
     use ratatui::buffer::Buffer;
 
     /// Build an app populated across all five lanes (intake / obs / tasks /
@@ -1947,13 +1950,14 @@ mod tests {
         );
     }
 
-    /// Phase 3 (T141): per-row column renderers surface store-specific cues.
+    /// Phase 4: per-row renderers use semantic labels for upstream/review stores.
     #[test]
-    fn format_obs_line_surfaces_tier_and_contract() {
+    fn format_obs_line_surfaces_semantic_label_tier_and_contract() {
         let row = Row::Obs(ObsRow {
             display_id: "L200".to_string(),
             status: "open".to_string(),
             priority: "normal".to_string(),
+            lifecycle: Some("ready".to_string()),
             summary: "obs with contract".to_string(),
             tier_hint: Some("T2".to_string()),
             contract_state: Some("ready".to_string()),
@@ -1965,6 +1969,7 @@ mod tests {
             false,
             &ExternalReviewState::default(),
         ));
+        assert!(text.contains("◆ investigate"), "{text}");
         assert!(text.contains("tier:T2"), "{text}");
         assert!(text.contains("contract:ready"), "{text}");
         assert!(text.contains("linked:T555"), "{text}");
@@ -1990,7 +1995,7 @@ mod tests {
     }
 
     #[test]
-    fn format_intake_line_surfaces_source_and_cluster() {
+    fn format_intake_line_surfaces_semantic_label_source_and_cluster() {
         let row = Row::Intake(IntakeRow {
             display_id: "I200".to_string(),
             status: "draft".to_string(),
@@ -2005,13 +2010,14 @@ mod tests {
             false,
             &ExternalReviewState::default(),
         ));
+        assert!(text.contains("◌ new"), "{text}");
         assert!(text.contains("source:executor"), "{text}");
         assert!(text.contains("cluster:watch-ux"), "{text}");
         assert!(text.contains("age:"), "{text}");
     }
 
     #[test]
-    fn format_review_line_surfaces_verdict_and_attempts() {
+    fn format_review_line_surfaces_semantic_label_verdict_and_attempts() {
         let row = Row::Review(ReviewRow {
             display_id: "E200".to_string(),
             task_id: "T100".to_string(),
@@ -2028,9 +2034,241 @@ mod tests {
             false,
             &ExternalReviewState::default(),
         ));
+        assert!(text.contains("◆ running"), "{text}");
         assert!(text.contains("verdict:PASS"), "{text}");
         assert!(text.contains("attempts:2"), "{text}");
         assert!(text.contains("sha:abcdef0"), "{text}");
+    }
+
+    #[test]
+    fn upstream_and_review_rows_cover_semantic_label_cases() {
+        let obs_cases = [
+            (
+                ObsRow {
+                    lifecycle: Some("candidate".to_string()),
+                    ..Default::default()
+                },
+                "candidate",
+            ),
+            (
+                ObsRow {
+                    waiting_kind: Some("info_needed".to_string()),
+                    ..Default::default()
+                },
+                "needs-info",
+            ),
+            (
+                ObsRow {
+                    contract_state: Some("draft".to_string()),
+                    ..Default::default()
+                },
+                "contract-draft",
+            ),
+            (
+                ObsRow {
+                    contract_state: Some("approved".to_string()),
+                    ..Default::default()
+                },
+                "contract-approved",
+            ),
+            (
+                ObsRow {
+                    pending_architecture_review: Some(true),
+                    ..Default::default()
+                },
+                "arch-gate",
+            ),
+            (
+                ObsRow {
+                    lifecycle: Some("in_progress".to_string()),
+                    ..Default::default()
+                },
+                "resolving",
+            ),
+            (
+                ObsRow {
+                    lifecycle: Some("closed".to_string()),
+                    ..Default::default()
+                },
+                "addressed",
+            ),
+            (
+                ObsRow {
+                    lifecycle: Some("closed".to_string()),
+                    outcome: Some("wont_fix".to_string()),
+                    ..Default::default()
+                },
+                "wont-fix",
+            ),
+            (
+                ObsRow {
+                    superseded_by_id: Some("L001".to_string()),
+                    ..Default::default()
+                },
+                "superseded",
+            ),
+            (
+                ObsRow {
+                    lifecycle: Some("ready".to_string()),
+                    ..Default::default()
+                },
+                "investigate",
+            ),
+        ];
+        for (idx, (mut obs, label)) in obs_cases.into_iter().enumerate() {
+            obs.display_id = format!("L{idx:03}");
+            obs.priority = "normal".to_string();
+            let text = line_text(format_row_line(
+                &Row::Obs(obs),
+                false,
+                &ExternalReviewState::default(),
+            ));
+            assert!(text.contains(label), "{label}: {text}");
+        }
+
+        let intake_cases = [
+            (
+                IntakeRow {
+                    lifecycle: Some("new".to_string()),
+                    ..Default::default()
+                },
+                "new",
+            ),
+            (
+                IntakeRow {
+                    lifecycle: Some("triaging".to_string()),
+                    ..Default::default()
+                },
+                "triage",
+            ),
+            (
+                IntakeRow {
+                    lifecycle: Some("waiting".to_string()),
+                    ..Default::default()
+                },
+                "needs-info",
+            ),
+            (
+                IntakeRow {
+                    lifecycle: Some("closed".to_string()),
+                    outcome: Some("routed_to_observation".to_string()),
+                    ..Default::default()
+                },
+                "routed",
+            ),
+            (
+                IntakeRow {
+                    lifecycle: Some("closed".to_string()),
+                    outcome: Some("marked_duplicate".to_string()),
+                    ..Default::default()
+                },
+                "duplicate",
+            ),
+            (
+                IntakeRow {
+                    lifecycle: Some("closed".to_string()),
+                    outcome: Some("dropped_as_noise".to_string()),
+                    ..Default::default()
+                },
+                "dropped",
+            ),
+            (
+                IntakeRow {
+                    lifecycle: Some("closed".to_string()),
+                    outcome: Some("escalated_to_architecture_review".to_string()),
+                    ..Default::default()
+                },
+                "arch-review",
+            ),
+        ];
+        for (idx, (mut intake, label)) in intake_cases.into_iter().enumerate() {
+            intake.display_id = format!("I{idx:03}");
+            let text = line_text(format_row_line(
+                &Row::Intake(intake),
+                false,
+                &ExternalReviewState::default(),
+            ));
+            assert!(text.contains(label), "{label}: {text}");
+        }
+
+        let review_cases = [
+            (
+                ReviewRow {
+                    status: "pending".to_string(),
+                    ..Default::default()
+                },
+                "pending",
+            ),
+            (
+                ReviewRow {
+                    status: "running".to_string(),
+                    ..Default::default()
+                },
+                "running",
+            ),
+            (
+                ReviewRow {
+                    status: "passed".to_string(),
+                    ..Default::default()
+                },
+                "passed",
+            ),
+            (
+                ReviewRow {
+                    status: "revise".to_string(),
+                    ..Default::default()
+                },
+                "revise",
+            ),
+            (
+                ReviewRow {
+                    status: "tooling_held".to_string(),
+                    ..Default::default()
+                },
+                "tool-fault",
+            ),
+            (
+                ReviewRow {
+                    status: "superseded".to_string(),
+                    ..Default::default()
+                },
+                "superseded",
+            ),
+        ];
+        for (idx, (mut review, label)) in review_cases.into_iter().enumerate() {
+            review.display_id = format!("E{idx:03}");
+            review.task_id = "T001".to_string();
+            let text = line_text(format_row_line(
+                &Row::Review(review),
+                false,
+                &ExternalReviewState::default(),
+            ));
+            assert!(text.contains(label), "{label}: {text}");
+        }
+    }
+
+    #[test]
+    fn external_review_default_row_hides_null_none_clutter() {
+        let row = Row::Review(ReviewRow {
+            display_id: "E999".to_string(),
+            task_id: "T999".to_string(),
+            status: "pending".to_string(),
+            runner: "unknown".to_string(),
+            held_reason: Some("none".to_string()),
+            next_retry_at: Some("none".to_string()),
+            ..Default::default()
+        });
+        let text = line_text(format_row_line(
+            &row,
+            false,
+            &ExternalReviewState::default(),
+        ));
+        assert!(!text.contains("runner=unknown"), "{text}");
+        assert!(!text.contains("held_reason=none"), "{text}");
+        assert!(!text.contains("held:none"), "{text}");
+        assert!(!text.contains("next_retry_at=none"), "{text}");
+        assert!(!text.contains("liveness=pending"), "{text}");
+        assert!(text.contains("runner=—"), "{text}");
     }
 
     #[test]

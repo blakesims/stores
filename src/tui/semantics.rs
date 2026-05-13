@@ -192,15 +192,31 @@ pub fn observation_presentation(row: &ObsRow) -> Presentation {
     {
         return presentation("◈", "arch-gate", PresentationSeverity::Gate, None);
     }
+    if row
+        .superseded_by_id
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || matches!(row.outcome.as_deref(), Some("superseded"))
+    {
+        return presentation("■", "superseded", PresentationSeverity::Exit, None);
+    }
     if matches!(row.waiting_kind.as_deref(), Some("info_needed")) {
         return presentation(
             "⋯",
-            "info-needed",
+            "needs-info",
             PresentationSeverity::Wait,
             Some("waiting".to_string()),
         );
     }
     if matches!(row.waiting_kind.as_deref(), Some("human_ratification")) {
+        return presentation(
+            "◈",
+            "contract-draft",
+            PresentationSeverity::Gate,
+            Some("contract draft".to_string()),
+        );
+    }
+    if matches!(row.contract_state.as_deref(), Some("draft")) {
         return presentation(
             "◈",
             "contract-draft",
@@ -218,11 +234,18 @@ pub fn observation_presentation(row: &ObsRow) -> Presentation {
             PresentationSeverity::Front,
             Some("needs triage".to_string()),
         ),
+        "ready" | "investigating" => presentation(
+            "◆",
+            "investigate",
+            PresentationSeverity::Work,
+            contract_signal(row),
+        ),
         "in_progress" => presentation("▣", "resolving", PresentationSeverity::Work, None),
         "closed" => match row.outcome.as_deref().unwrap_or(row.status.as_str()) {
             "wont_fix" | "wont-fix" => {
                 presentation("×", "wont-fix", PresentationSeverity::Exit, None)
             }
+            "superseded" => presentation("■", "superseded", PresentationSeverity::Exit, None),
             _ => presentation("✓", "addressed", PresentationSeverity::Exit, None),
         },
         _ => presentation(
@@ -316,11 +339,15 @@ pub fn external_review_presentation(row: &ReviewRow) -> Presentation {
             PresentationSeverity::Gate,
             findings_signal(row),
         ),
-        "tooling_held" => presentation(
+        "tooling_held" | "tool_fault" | "tool-fault" => presentation(
             "▲",
             "tool-fault",
             PresentationSeverity::Fault,
-            row.held_reason.clone(),
+            row.held_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "none")
+                .map(str::to_string),
         ),
         "superseded" => presentation("■", "superseded", PresentationSeverity::Exit, None),
         other => presentation("◌", other, PresentationSeverity::Front, None),
@@ -524,7 +551,7 @@ mod tests {
             ..Default::default()
         };
         let p = observation_presentation(&info);
-        assert_eq!((p.glyph, p.label.as_str()), ("⋯", "info-needed"));
+        assert_eq!((p.glyph, p.label.as_str()), ("⋯", "needs-info"));
     }
 
     #[test]
