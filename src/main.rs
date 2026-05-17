@@ -211,6 +211,17 @@ fn main() -> Result<()> {
                     })?;
                 }
             }
+            Some(("enumerate", esub)) => {
+                let catalog = cli::test::matrix::Catalog::parse(
+                    esub.get_one::<String>("catalog")
+                        .map(String::as_str)
+                        .unwrap_or("smoke"),
+                )?;
+                cli::test::matrix::run_enumerate(cli::test::matrix::EnumerateOpts {
+                    catalog,
+                    coverage: *esub.get_one::<bool>("coverage").unwrap_or(&false),
+                })?;
+            }
             _ => {
                 let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
                 if let Some(test_cmd) = cmd2.find_subcommand_mut("test") {

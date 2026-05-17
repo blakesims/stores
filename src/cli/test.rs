@@ -12,6 +12,9 @@ use crate::flow::{AgentEntry, AgentsYaml, RetryPolicy};
 use crate::handlers::drive::drive_loop;
 use crate::schema::Schema;
 
+#[path = "test/matrix/mod.rs"]
+pub mod matrix;
+
 #[derive(Debug, Clone)]
 pub struct TestRunOpts {
     pub case_name: Option<String>,
@@ -65,6 +68,9 @@ pub struct CaseExpect {
     pub external_review: Option<String>,
     #[serde(default = "default_true")]
     pub no_real_llm: bool,
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub visited: Option<Vec<matrix::VisitedEdge>>,
 }
 
 impl Default for CaseExpect {
@@ -75,6 +81,7 @@ impl Default for CaseExpect {
             external_review_status: default_expect_external_review_status(),
             external_review: None,
             no_real_llm: true,
+            visited: None,
         }
     }
 }
@@ -243,6 +250,7 @@ fn load_case(opts: &TestRunOpts) -> Result<(String, TestCase, Option<PathBuf>)> 
             .with_context(|| format!("resolving {}", path.display()))?;
         let raw = std::fs::read_to_string(&case_path)
             .with_context(|| format!("reading {}", case_path.display()))?;
+        validate_case_manifest_yaml(&raw)?;
         let manifest: TestManifest =
             serde_yaml::from_str(&raw).context("parsing test case YAML")?;
         let name = opts
@@ -267,6 +275,7 @@ fn load_case(opts: &TestRunOpts) -> Result<(String, TestCase, Option<PathBuf>)> 
         "stale-base-refuses" => PRESET_STALE_BASE_REFUSES,
         other => bail!("unknown stores test preset '{other}' (use --case-file for custom YAML)"),
     };
+    validate_case_manifest_yaml(raw)?;
     let manifest: TestManifest = serde_yaml::from_str(raw).unwrap();
     let key = if name == "t3-er-fail" {
         "t3-failed-er"
@@ -288,6 +297,60 @@ fn preset_scenario(name: &str) -> &'static str {
 
 fn is_stale_base_refuses_case(case_name: &str) -> bool {
     case_name == "stale-base-refuses"
+}
+
+fn validate_case_manifest_yaml(raw: &str) -> Result<()> {
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(raw).context("parsing test case YAML for validation")?;
+    validate_no_consequence_faking(&value, &mut Vec::new(), "$")
+}
+
+fn validate_no_consequence_faking(
+    value: &serde_yaml::Value,
+    path_parts: &mut Vec<String>,
+    path: &str,
+) -> Result<()> {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            for (key, nested) in map {
+                let key_name = key.as_str().unwrap_or("<non-string-key>");
+                let next_path = format!("{path}.{key_name}");
+                path_parts.push(key_name.to_string());
+                if is_forbidden_consequence_key(key_name) && !is_under_case_level_expect(path_parts)
+                {
+                    bail!(
+                        "case DSL field '{key_name}' is only allowed under $.cases.<case-id>.expect (found at {next_path})"
+                    );
+                }
+                validate_no_consequence_faking(nested, path_parts, &next_path)?;
+                path_parts.pop();
+            }
+        }
+        serde_yaml::Value::Sequence(items) => {
+            for (idx, nested) in items.iter().enumerate() {
+                validate_no_consequence_faking(nested, path_parts, &format!("{path}[{idx}]"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn is_under_case_level_expect(path_parts: &[String]) -> bool {
+    path_parts.len() >= 4 && path_parts[0] == "cases" && path_parts[2] == "expect"
+}
+
+fn is_forbidden_consequence_key(key: &str) -> bool {
+    matches!(
+        key,
+        "final_status"
+            | "force_status"
+            | "external_review_status"
+            | "integration_result"
+            | "blocked_reason"
+            | "stale_base"
+            | "stale_external_review"
+    )
 }
 
 fn validate_case_shape(case: &TestCase) -> Result<()> {
@@ -1037,8 +1100,12 @@ impl LiveHarness {
 
     fn test_authorized_accept_output(&self) -> Result<LiveCommandOutput> {
         let conn = self.conn()?;
-        ensure_stores_test_task_provenance(&conn, &self.task_id)
-            .with_context(|| format!("refusing fake-review accept for non-test task {}", self.task_id))?;
+        ensure_stores_test_task_provenance(&conn, &self.task_id).with_context(|| {
+            format!(
+                "refusing fake-review accept for non-test task {}",
+                self.task_id
+            )
+        })?;
         run_live_stores_cmd_output(
             &self.root,
             ["tasks", "accept", &self.task_id, "--invoker", "human"],
@@ -1872,11 +1939,77 @@ mod tests {
       task_status: in_review
       lifecycle: active
       external_review_status: tooling_held
+      visited:
+        - from_status: planning
+          to_status: plan_review
+          verb: submit-plan
 "#;
+        validate_case_manifest_yaml(raw).unwrap();
         let m: TestManifest = serde_yaml::from_str(raw).unwrap();
         let c = m.cases.get("custom").unwrap();
         assert_eq!(c.stages["code_reviewer"].attempts[0].outcome, "REVISE");
         assert_eq!(c.expect.task_status, "in_review");
+        assert_eq!(
+            c.expect.visited.as_ref().unwrap()[0].from_status.as_deref(),
+            Some("planning")
+        );
+    }
+
+    #[test]
+    fn case_dsl_rejects_consequence_faking_outside_expect() {
+        let raw = r#"cases:
+  bad:
+    stages:
+      executor:
+        outcome: PASS
+        integration_result: refused
+    expect:
+      task_status: in_review
+      external_review_status: passed
+"#;
+        let err = validate_case_manifest_yaml(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("integration_result")
+                && err.to_string().contains("$.cases.<case-id>.expect"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn case_dsl_rejects_nested_expect_under_stage() {
+        let raw = r#"cases:
+  bad:
+    stages:
+      executor:
+        outcome: PASS
+        expect:
+          integration_result: refused
+    expect:
+      task_status: in_review
+      external_review_status: passed
+"#;
+        let err = validate_case_manifest_yaml(raw).unwrap_err();
+        assert!(
+            err.to_string().contains("integration_result")
+                && err.to_string().contains("$.cases.<case-id>.expect"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn case_dsl_allows_consequence_expectations_under_case_level_expect() {
+        let raw = r#"cases:
+  ok:
+    stages:
+      executor:
+        outcome: PASS
+    expect:
+      task_status: in_review
+      external_review_status: passed
+      integration_result: refused
+      blocked_reason: stale_external_review
+"#;
+        validate_case_manifest_yaml(raw).unwrap();
     }
 
     #[test]
@@ -2173,7 +2306,10 @@ mod tests {
                 ("STORES_FAKE_EXECUTOR_MODE", Some("preexisting-mode".into())),
                 ("STORES_FAKE_CASE_FILE", None),
                 ("STORES_FAKE_CASE_NAME", Some("preexisting-case".into())),
-                ("STORES_ALLOW_FAKE_REVIEW_ACCEPT", Some("preexisting-allow".into())),
+                (
+                    "STORES_ALLOW_FAKE_REVIEW_ACCEPT",
+                    Some("preexisting-allow".into()),
+                ),
             ];
             for (key, value) in &expected {
                 match value {
@@ -2192,7 +2328,11 @@ mod tests {
             .expect("happy-path harness run should return successfully");
 
             for (key, value) in expected {
-                assert_eq!(std::env::var_os(key), value, "{key} leaked after stores test run");
+                assert_eq!(
+                    std::env::var_os(key),
+                    value,
+                    "{key} leaked after stores test run"
+                );
             }
         });
     }

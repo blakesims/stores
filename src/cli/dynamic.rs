@@ -260,6 +260,22 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         )
                         .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue))
                         .arg(Arg::new("live").long("live").action(ArgAction::SetTrue)),
+                )
+                .subcommand(
+                    Command::new("enumerate")
+                        .about("Print fake traversal matrix catalog cases and coverage tags without live mutation")
+                        .arg(
+                            Arg::new("catalog")
+                                .long("catalog")
+                                .value_parser(["smoke", "full"])
+                                .default_value("smoke"),
+                        )
+                        .arg(
+                            Arg::new("coverage")
+                                .long("coverage")
+                                .action(ArgAction::SetTrue)
+                                .help("Print coverage tags for schema edges, runner outcomes, perturbations, and authority events"),
+                        ),
                 ),
         )
         // Skills subcommand
