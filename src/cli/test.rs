@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -375,6 +375,36 @@ fn fake_agent_bin() -> Result<PathBuf> {
     Ok(PathBuf::from("stores-fake-agent"))
 }
 
+fn ensure_stores_test_task_provenance(conn: &Connection, task_id: &str) -> Result<()> {
+    let row: Option<(String, String, Option<String>)> = conn
+        .query_row(
+            "SELECT title, slug, contract FROM tasks WHERE display_id=?1",
+            [task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .with_context(|| format!("reading test task provenance for {task_id}"))?;
+    let Some((title, slug, contract)) = row else {
+        bail!("task {task_id} not found for test-authorized action");
+    };
+
+    let title_is_test = title.starts_with("stores test live ") || title == "stores test synthetic";
+    let slug_is_test = slug.starts_with("stores-test-live-") || slug == "stores-test";
+    let contract_is_test = contract.as_deref().is_some_and(|raw| {
+        raw.contains("stores test live fake runner rows only")
+            || raw.contains("fake harness reaches expectation")
+            || raw.contains("fake harness only")
+    });
+
+    if title_is_test && slug_is_test && contract_is_test {
+        return Ok(());
+    }
+
+    bail!(
+        "task {task_id} is not stores-test owned; title={title:?} slug={slug:?}. refusing test-authorized fake-review action"
+    )
+}
+
 struct LiveHarness {
     case_name: String,
     task_id: String,
@@ -730,11 +760,7 @@ impl LiveHarness {
 
     fn attempt_accept_enqueue_and_integration(&self) -> Result<LiveRefusalProof> {
         let mut outputs = Vec::new();
-        let accept = run_live_stores_cmd_output(
-            &self.root,
-            ["tasks", "accept", &self.task_id, "--invoker", "human"],
-            "stores tasks accept",
-        )?;
+        let accept = self.test_authorized_accept_output()?;
         outputs.push(accept.clone());
         if !accept.success {
             return Ok(LiveRefusalProof::from_outputs(outputs));
@@ -993,11 +1019,14 @@ impl LiveHarness {
     }
 
     fn accept_for_integration(&self) -> Result<()> {
-        run_live_stores_cmd(
-            &self.root,
-            ["tasks", "accept", &self.task_id, "--invoker", "human"],
-            "stores tasks accept",
-        )?;
+        let accept = self.test_authorized_accept_output()?;
+        if !accept.success {
+            bail!(
+                "stores test-authorized accept failed: stderr={} stdout={}",
+                accept.stderr,
+                accept.stdout
+            );
+        }
         run_live_stores_cmd(
             &self.root,
             ["tasks", "enqueue-integration", &self.task_id],
@@ -1006,8 +1035,22 @@ impl LiveHarness {
         Ok(())
     }
 
+    fn test_authorized_accept_output(&self) -> Result<LiveCommandOutput> {
+        let conn = self.conn()?;
+        ensure_stores_test_task_provenance(&conn, &self.task_id)
+            .with_context(|| format!("refusing fake-review accept for non-test task {}", self.task_id))?;
+        run_live_stores_cmd_output(
+            &self.root,
+            ["tasks", "accept", &self.task_id, "--invoker", "human"],
+            "stores test-authorized tasks accept",
+        )
+    }
+
     fn isolate_live_case(&self) -> Result<()> {
-        self.freeze_latest_tooling_held_review_retry()?;
+        // Phase-0 safety: live/current-repo cases must not raw-SQL write
+        // substrate rows to manufacture or freeze outcomes. Deactivation goes
+        // through the normal task verb; any future retry control needs a real
+        // external-review/test-authority verb rather than an UPDATE here.
         let out = Command::new(stores_bin_for_preflight()?)
             .args([
                 "tasks",
@@ -1030,19 +1073,6 @@ impl LiveHarness {
                 String::from_utf8_lossy(&out.stdout)
             );
         }
-        Ok(())
-    }
-
-    fn freeze_latest_tooling_held_review_retry(&self) -> Result<()> {
-        let conn = self.conn()?;
-        conn.execute(
-            "UPDATE external_reviews \
-             SET next_retry_at='9999-12-31T23:59:59Z', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') \
-             WHERE id = (SELECT id FROM external_reviews WHERE task_id=?1 ORDER BY id DESC LIMIT 1) \
-               AND status='tooling_held'",
-            [&self.task_id],
-        )
-        .with_context(|| format!("freezing latest tooling-held review retry for {}", self.task_id))?;
         Ok(())
     }
 
@@ -1428,6 +1458,61 @@ fn live_task_review_policy(case_name: &str) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug)]
+struct LabArena {
+    root: PathBuf,
+    repo: PathBuf,
+    stores_dir: PathBuf,
+    db_path: PathBuf,
+    approval_token_path: PathBuf,
+}
+
+#[allow(dead_code)]
+fn create_lab_arena(base: &Path, run_id: &str) -> Result<LabArena> {
+    if run_id.trim().is_empty() || run_id.contains('/') || run_id.contains('\\') {
+        bail!("lab run_id must be a non-empty path segment");
+    }
+    let root = base.join(run_id);
+    let repo = root.join("repo");
+    let stores_dir = repo.join(".stores");
+    std::fs::create_dir_all(stores_dir.join("runs"))?;
+
+    let tasks_schema = bundled_schema("tasks")?;
+    let external_reviews_schema = bundled_schema("external_reviews")?;
+    let conn = Connection::open(stores_dir.join("db.sqlite"))?;
+    conn.execute_batch(&ddl_for(&tasks_schema))?;
+    conn.execute_batch(&ddl_for(&external_reviews_schema))?;
+    crate::db::ensure_runs_view_if_tasks_exists(&conn)?;
+    crate::handlers::framework_migrate::ensure_integration_singleton_index(&conn)?;
+    drop(conn);
+
+    git_ok(&repo, &["init", "-b", "main"])?;
+    git_ok(&repo, &["config", "user.email", "fake@example.test"])?;
+    git_ok(&repo, &["config", "user.name", "Fake Test"])?;
+    std::fs::write(repo.join("README.md"), format!("stores lab {run_id}\n"))?;
+    git_ok(&repo, &["add", "README.md"])?;
+    git_ok(&repo, &["commit", "-m", "lab base"])?;
+
+    let approval_token_path = root.join("approve.token");
+    std::fs::write(&approval_token_path, format!("lab-token-{run_id}\n"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut p = std::fs::metadata(&approval_token_path)?.permissions();
+        p.set_mode(0o600);
+        std::fs::set_permissions(&approval_token_path, p)?;
+    }
+
+    Ok(LabArena {
+        root,
+        repo,
+        stores_dir: stores_dir.clone(),
+        db_path: stores_dir.join("db.sqlite"),
+        approval_token_path,
+    })
+}
+
 struct Harness {
     _tmp: tempfile::TempDir,
     conn: Connection,
@@ -1535,6 +1620,10 @@ impl Harness {
     }
 
     fn run_external_review(&self) -> Result<()> {
+        // Non-live temp harness fixture seeding. This in-memory/temp-db path is
+        // intentionally not used as proof that the live substrate produced the
+        // pending ER row; live/current/lab matrix paths must create rows through
+        // real verbs/subscribers.
         self.conn.execute("INSERT INTO external_reviews (display_id,status,task_id,attempt,adapter,created_at,updated_at,created_by,updated_by) VALUES ('ERTEST','pending',?1,1,'external_review','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','stores-test','stores-test')", [&self.task_id])?;
         let agents = AgentsYaml {
             agents: vec![],
@@ -1685,6 +1774,9 @@ fn bundled_schema(name: &str) -> Result<Schema> {
 }
 
 fn insert_task(conn: &Connection, task_id: &str, workspace: &str, branch: &str) -> Result<()> {
+    // Non-live temp harness fixture seeding only. This helper must not be used
+    // by current-repo/live proof paths, where task creation needs to go through
+    // `stores tasks add` or the future lab/current test authority path.
     let contract = json!({
         "done_when": "fake harness reaches expectation",
         "scope_in": "fake harness only",
@@ -1944,40 +2036,88 @@ mod tests {
     }
 
     #[test]
-    fn live_case_isolation_freezes_tooling_retry_without_changing_status() {
+    fn lab_arena_foundation_creates_real_git_repo_and_stores_db() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("db.sqlite");
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE external_reviews (id INTEGER PRIMARY KEY, display_id TEXT, status TEXT, task_id TEXT, next_retry_at TEXT, updated_at TEXT);\n\
-             INSERT INTO external_reviews (display_id,status,task_id,next_retry_at,updated_at) VALUES ('ERUNIT','tooling_held','TUNIT','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z');",
-        )
-        .unwrap();
-        drop(conn);
-        let h = LiveHarness {
-            case_name: "unit".to_string(),
-            task_id: "TUNIT".to_string(),
-            db_path,
-            root: dir.path().to_path_buf(),
-        };
+        let lab = create_lab_arena(dir.path(), "run-phase0").unwrap();
 
-        h.freeze_latest_tooling_held_review_retry().unwrap();
-
-        let conn = h.conn().unwrap();
-        let row: (String, String) = conn
+        assert!(lab.root.ends_with("run-phase0"));
+        assert_eq!(lab.stores_dir, lab.repo.join(".stores"));
+        assert!(lab.db_path.exists());
+        assert!(lab.approval_token_path.exists());
+        let head = git_out(&lab.repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), "main");
+        let conn = Connection::open(&lab.db_path).unwrap();
+        let tasks_table: i64 = conn
             .query_row(
-                "SELECT status,next_retry_at FROM external_reviews WHERE display_id='ERUNIT'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(
-            row,
-            (
-                "tooling_held".to_string(),
-                "9999-12-31T23:59:59Z".to_string()
-            )
+        assert_eq!(tasks_table, 1);
+    }
+
+    #[test]
+    fn test_authority_provenance_accepts_stores_test_task_markers() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (display_id TEXT PRIMARY KEY, title TEXT, slug TEXT, contract TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id,title,slug,contract) VALUES (?1,?2,?3,?4)",
+            params![
+                "TTEST",
+                "stores test live happy-path",
+                "stores-test-live-happy-path-123",
+                json!({"scope_in":"stores test live fake runner rows only"}).to_string()
+            ],
+        )
+        .unwrap();
+
+        ensure_stores_test_task_provenance(&conn, "TTEST").unwrap();
+    }
+
+    #[test]
+    fn test_authority_provenance_refuses_prod_shaped_task() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE tasks (display_id TEXT PRIMARY KEY, title TEXT, slug TEXT, contract TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tasks (display_id,title,slug,contract) VALUES (?1,?2,?3,?4)",
+            params![
+                "TPROD",
+                "real product work",
+                "real-product-work",
+                json!({"scope_in":"production work"}).to_string()
+            ],
+        )
+        .unwrap();
+
+        let err = ensure_stores_test_task_provenance(&conn, "TPROD").unwrap_err();
+        assert!(
+            err.to_string().contains("not stores-test owned"),
+            "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn fake_mode_preflight_fails_when_fake_runner_binary_missing() {
+        with_harness_env(|| {
+            let missing = tempfile::tempdir()
+                .unwrap()
+                .path()
+                .join("missing-stores-fake-agent");
+            std::env::set_var("STORES_FAKE_AGENT_BIN", &missing);
+
+            let err = preflight_fake_mode().unwrap_err();
+            assert!(
+                err.to_string().contains("stores-fake-agent not found"),
+                "unexpected error: {err}"
+            );
+        });
     }
 
     #[test]
@@ -2019,6 +2159,42 @@ mod tests {
             ..good
         };
         assert!(!h.matches_expect(&expect, &bad_er));
+    }
+
+    #[test]
+    fn stores_test_run_restores_fake_env_after_return() {
+        with_harness_env(|| {
+            let fake_bin = stores_fake_agent_bin_for_unit_tests();
+            let expected: Vec<(&str, Option<std::ffi::OsString>)> = vec![
+                ("STORES_LLM_OFF", Some("preexisting-llm-off".into())),
+                ("STORES_FAKE_AGENT_BIN", Some(fake_bin.into_os_string())),
+                ("STORES_FAKE_SCENARIO", Some("preexisting-scenario".into())),
+                ("STORES_FAKE_DELAY_MS", Some("12345".into())),
+                ("STORES_FAKE_EXECUTOR_MODE", Some("preexisting-mode".into())),
+                ("STORES_FAKE_CASE_FILE", None),
+                ("STORES_FAKE_CASE_NAME", Some("preexisting-case".into())),
+                ("STORES_ALLOW_FAKE_REVIEW_ACCEPT", Some("preexisting-allow".into())),
+            ];
+            for (key, value) in &expected {
+                match value {
+                    Some(v) => std::env::set_var(key, v),
+                    None => std::env::remove_var(key),
+                }
+            }
+
+            run(TestRunOpts {
+                case_name: Some("happy-path".to_string()),
+                case_file: None,
+                delay_ms: Some(0),
+                watch: false,
+                live: false,
+            })
+            .expect("happy-path harness run should return successfully");
+
+            for (key, value) in expected {
+                assert_eq!(std::env::var_os(key), value, "{key} leaked after stores test run");
+            }
+        });
     }
 
     #[test]
