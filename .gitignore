@@ -22,3 +22,9 @@
 /tasks/planning/TNZ*/
 /tasks/active/TSTL*/
 /tasks/planning/TSTL*/
+
+# Generated task projections / live harness artifacts. The substrate DB is source of truth.
+/tasks/active/
+/tasks/planning/
+/.tmp/
+/live-fake-stale-base/
