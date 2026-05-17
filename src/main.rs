@@ -222,6 +222,24 @@ fn main() -> Result<()> {
                     coverage: *esub.get_one::<bool>("coverage").unwrap_or(&false),
                 })?;
             }
+            Some(("matrix", msub)) => {
+                let catalog = cli::test::matrix::Catalog::parse(
+                    msub.get_one::<String>("catalog")
+                        .map(String::as_str)
+                        .unwrap_or("smoke"),
+                )?;
+                let mode = cli::test::matrix::MatrixMode::parse(
+                    msub.get_one::<String>("mode")
+                        .map(String::as_str)
+                        .unwrap_or("lab"),
+                )?;
+                cli::test::matrix::run_matrix(cli::test::matrix::MatrixOpts {
+                    catalog,
+                    mode,
+                    only: msub.get_one::<String>("only").cloned(),
+                    watch: *msub.get_one::<bool>("watch").unwrap_or(&false),
+                })?;
+            }
             _ => {
                 let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);
                 if let Some(test_cmd) = cmd2.find_subcommand_mut("test") {

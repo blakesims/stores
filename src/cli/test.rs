@@ -1805,7 +1805,46 @@ impl Harness {
         if er != want_er {
             bail!("expected external_review_status={} got {}", want_er, er);
         }
+        if let Some(visited) = expect.visited.as_deref() {
+            let rows = self.transition_history_rows()?;
+            match matrix::match_visited_subsequence(Some(visited), &rows) {
+                matrix::VisitedMatch::Matched => {}
+                matrix::VisitedMatch::Skipped => {}
+                matrix::VisitedMatch::Missing {
+                    expected_index,
+                    expected,
+                } => {
+                    bail!(
+                        "expected visited edge #{expected_index} not found in transition_history: {:?}",
+                        expected
+                    );
+                }
+            }
+        }
         Ok(())
+    }
+
+    fn transition_history_rows(&self) -> Result<Vec<matrix::TransitionHistoryRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT from_status,to_status,lifecycle_from,lifecycle_to,active_step_from,active_step_to,integration_step_from,integration_step_to,verb,invoker \
+             FROM transition_history WHERE store='tasks' AND display_id=?1 ORDER BY id",
+        )?;
+        let rows = stmt.query_map([&self.task_id], |r| {
+            Ok(matrix::TransitionHistoryRow {
+                from_status: r.get(0)?,
+                to_status: r.get(1)?,
+                lifecycle_from: r.get(2)?,
+                lifecycle_to: r.get(3)?,
+                active_step_from: r.get(4)?,
+                active_step_to: r.get(5)?,
+                integration_step_from: r.get(6)?,
+                integration_step_to: r.get(7)?,
+                verb: r.get(8)?,
+                invoker: r.get(9)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("read transition_history rows")
     }
 
     fn assert_no_real_llm(&self) -> Result<()> {

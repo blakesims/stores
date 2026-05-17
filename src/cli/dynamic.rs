@@ -276,6 +276,34 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .action(ArgAction::SetTrue)
                                 .help("Print coverage tags for schema edges, runner outcomes, perturbations, and authority events"),
                         ),
+                )
+                .subcommand(
+                    Command::new("matrix")
+                        .about("Run fake traversal matrix cases and report PASS/FAIL/SKIP/ERROR rows")
+                        .arg(
+                            Arg::new("mode")
+                                .long("mode")
+                                .value_parser(["lab"])
+                                .default_value("lab")
+                                .help("Execution mode (Phase 2 MVP supports lab only)"),
+                        )
+                        .arg(
+                            Arg::new("catalog")
+                                .long("catalog")
+                                .value_parser(["smoke", "full"])
+                                .default_value("smoke"),
+                        )
+                        .arg(
+                            Arg::new("only")
+                                .long("only")
+                                .help("Run one matrix case id (also supports matrix-intentional-red for RED proof)"),
+                        )
+                        .arg(
+                            Arg::new("watch")
+                                .long("watch")
+                                .action(ArgAction::SetTrue)
+                                .help("Print underlying harness progress while executable rows run"),
+                        ),
                 ),
         )
         // Skills subcommand

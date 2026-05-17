@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
-use anyhow::{bail, Result};
-use serde::Deserialize;
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Catalog {
@@ -32,6 +34,36 @@ pub struct EnumerateOpts {
     pub coverage: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatrixMode {
+    Lab,
+}
+
+impl MatrixMode {
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw {
+            "lab" => Ok(Self::Lab),
+            other => {
+                bail!("unsupported stores test matrix mode '{other}' (Phase 2 MVP supports lab)")
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lab => "lab",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MatrixOpts {
+    pub catalog: Catalog,
+    pub mode: MatrixMode,
+    pub only: Option<String>,
+    pub watch: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CoverageTags {
     pub schema_edges: Vec<&'static str>,
@@ -47,6 +79,26 @@ pub struct TraversalSpec {
     pub description: &'static str,
     pub expected: &'static str,
     pub coverage: CoverageTags,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum MatrixVerdict {
+    Pass,
+    Fail,
+    Skip,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MatrixCaseResult {
+    pub id: String,
+    pub family: String,
+    pub expected: String,
+    pub observed: String,
+    pub verdict: MatrixVerdict,
+    pub artifact_dir: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -231,11 +283,358 @@ pub fn run_enumerate(opts: EnumerateOpts) -> Result<()> {
     Ok(())
 }
 
+pub fn run_matrix(opts: MatrixOpts) -> Result<()> {
+    let specs = select_matrix_specs(opts.catalog, opts.only.as_deref())?;
+    let run_id = matrix_run_id();
+    let root = PathBuf::from(".stores").join("test-matrix").join(&run_id);
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("creating matrix artifact root {}", root.display()))?;
+
+    println!(
+        "Stores Fake Traversal Matrix — mode={} catalog={} run={} cases={}",
+        opts.mode.as_str(),
+        opts.catalog.as_str(),
+        run_id,
+        specs.len()
+    );
+    println!(
+        "{:<28} {:<18} {:<22} {:<10} ARTIFACT",
+        "CASE", "FAMILY", "EXPECTED", "VERDICT"
+    );
+    println!("{}", "─".repeat(96));
+
+    let mut results = Vec::new();
+    for spec in specs {
+        let artifact_dir = root.join(spec.id);
+        std::fs::create_dir_all(&artifact_dir)
+            .with_context(|| format!("creating artifact dir {}", artifact_dir.display()))?;
+        let result = run_matrix_case(opts.mode, &spec, &artifact_dir, opts.watch);
+        let case_result = match result {
+            Ok(result) => result,
+            Err(err) => MatrixCaseResult {
+                id: spec.id.to_string(),
+                family: spec.family.to_string(),
+                expected: spec.expected.to_string(),
+                observed: "harness-error".to_string(),
+                verdict: MatrixVerdict::Error,
+                artifact_dir: artifact_dir.display().to_string(),
+                message: err.to_string(),
+            },
+        };
+        write_case_artifacts(&artifact_dir, &case_result)?;
+        println!(
+            "{:<28} {:<18} {:<22} {:<10} {}",
+            case_result.id,
+            case_result.family,
+            case_result.expected,
+            verdict_label(case_result.verdict),
+            case_result.artifact_dir
+        );
+        if !case_result.message.is_empty() {
+            println!("  {}", case_result.message);
+        }
+        results.push(case_result);
+    }
+
+    write_index_artifact(&root, &run_id, opts.mode, opts.catalog, &results)?;
+    let pass = results
+        .iter()
+        .filter(|r| r.verdict == MatrixVerdict::Pass)
+        .count();
+    let fail = results
+        .iter()
+        .filter(|r| r.verdict == MatrixVerdict::Fail)
+        .count();
+    let skip = results
+        .iter()
+        .filter(|r| r.verdict == MatrixVerdict::Skip)
+        .count();
+    let error = results
+        .iter()
+        .filter(|r| r.verdict == MatrixVerdict::Error)
+        .count();
+    println!("Summary: {pass} PASS / {fail} FAIL / {skip} SKIP / {error} ERROR");
+    println!("Report: {}", root.display());
+    Ok(())
+}
+
 fn print_coverage(label: &str, tags: &[&str]) {
     if tags.is_empty() {
         println!("  {label}: -");
     } else {
         println!("  {label}: {}", tags.join(","));
+    }
+}
+
+fn select_matrix_specs(catalog: Catalog, only: Option<&str>) -> Result<Vec<TraversalSpec>> {
+    if let Some("matrix-intentional-red") = only {
+        return Ok(vec![intentional_red_spec()]);
+    }
+    let specs = catalog_specs(catalog);
+    if let Some(only) = only {
+        let spec = specs
+            .into_iter()
+            .find(|spec| spec.id == only)
+            .with_context(|| {
+                format!(
+                    "matrix case '{only}' not found in {} catalog",
+                    catalog.as_str()
+                )
+            })?;
+        Ok(vec![spec])
+    } else {
+        Ok(specs)
+    }
+}
+
+fn run_matrix_case(
+    mode: MatrixMode,
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    match mode {
+        MatrixMode::Lab => run_lab_case(spec, artifact_dir, watch),
+    }
+}
+
+fn run_lab_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    match spec.id {
+        "T3-hp-with-substeps" => {
+            let case_file = write_happy_with_substeps_case_file(artifact_dir)?;
+            run_existing_fake_harness_case(
+                spec,
+                artifact_dir,
+                "T3-hp-with-substeps",
+                Some(case_file),
+                watch,
+            )
+        }
+        "matrix-intentional-red" => {
+            let case_file = write_intentional_red_case_file(artifact_dir)?;
+            run_existing_fake_harness_case(
+                spec,
+                artifact_dir,
+                "matrix-intentional-red",
+                Some(case_file),
+                watch,
+            )
+        }
+        _ => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: "not-implemented-in-phase-2-mvp".to_string(),
+            verdict: MatrixVerdict::Skip,
+            artifact_dir: artifact_dir.display().to_string(),
+            message: "Phase 2 MVP only executes T3-hp-with-substeps and matrix-intentional-red; this row is cataloged for later phases".to_string(),
+        }),
+    }
+}
+
+fn run_existing_fake_harness_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    case_name: &str,
+    case_file: Option<PathBuf>,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let opts = super::TestRunOpts {
+        case_name: Some(case_name.to_string()),
+        case_file,
+        delay_ms: Some(0),
+        watch,
+        live: false,
+    };
+    let result = super::run(opts);
+    let artifact_dir_display = artifact_dir.display().to_string();
+    match result {
+        Ok(()) => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: spec.expected.to_string(),
+            verdict: MatrixVerdict::Pass,
+            artifact_dir: artifact_dir_display,
+            message: "executable lab MVP row ran existing fake harness with real fake-runner subprocess, SQLite temp DB, git repo/worktree, and no real LLM".to_string(),
+        }),
+        Err(err) if is_expectation_mismatch(&err) => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: err.to_string(),
+            verdict: MatrixVerdict::Fail,
+            artifact_dir: artifact_dir_display,
+            message: format!("RED expectation mismatch: {err}"),
+        }),
+        Err(err) => Err(err),
+    }
+}
+
+fn is_expectation_mismatch(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("expected task_status=")
+        || msg.contains("expected lifecycle=")
+        || msg.contains("expected external_review_status=")
+        || msg.contains("expected visited edge")
+}
+
+fn write_happy_with_substeps_case_file(artifact_dir: &Path) -> Result<PathBuf> {
+    let path = artifact_dir.join("happy-with-substeps-case.yaml");
+    std::fs::write(
+        &path,
+        r#"cases:
+  T3-hp-with-substeps:
+    tier: T3
+    executor_mode: marker_file
+    stages:
+      planner: { outcome: PASS }
+      plan_reviewer: { outcome: PASS }
+      executor: { outcome: PASS }
+      code_reviewer: { outcome: PASS }
+      wrap: { outcome: PASS }
+      external_review: { outcome: PASS }
+    expect:
+      task_status: integrated
+      lifecycle: done
+      external_review_status: passed
+      no_real_llm: true
+      visited:
+        - { from_status: in_review, to_status: accepted, verb: accept }
+        - { from_status: accepted, to_status: integration_queued, verb: release-to-integration }
+        - { from_status: integration_queued, to_status: integrating, verb: start-integration }
+        - { from_status: integrating, to_status: integrating, verb: mark_refresh_done, integration_step_from: refreshing, integration_step_to: task_review }
+        - { from_status: integrating, to_status: integrating, verb: mark_task_review_done, integration_step_from: task_review, integration_step_to: testing }
+        - { from_status: integrating, to_status: integrating, verb: mark_testing_done, integration_step_from: testing, integration_step_to: merging }
+        - { from_status: integrating, to_status: integrating, verb: mark_merge_done, integration_step_from: merging, integration_step_to: deploying }
+"#,
+    )
+    .with_context(|| format!("writing happy substeps case file {}", path.display()))?;
+    Ok(path)
+}
+
+fn write_intentional_red_case_file(artifact_dir: &Path) -> Result<PathBuf> {
+    let path = artifact_dir.join("intentional-red-case.yaml");
+    std::fs::write(
+        &path,
+        r#"cases:
+  matrix-intentional-red:
+    tier: T3
+    executor_mode: marker_file
+    stages:
+      planner: { outcome: PASS }
+      plan_reviewer: { outcome: PASS }
+      executor: { outcome: PASS }
+      code_reviewer: { outcome: PASS }
+      wrap: { outcome: PASS }
+      external_review: { outcome: PASS }
+    expect:
+      task_status: blocked
+      lifecycle: active
+      external_review_status: passed
+      no_real_llm: true
+"#,
+    )
+    .with_context(|| format!("writing intentional RED case file {}", path.display()))?;
+    Ok(path)
+}
+
+fn write_case_artifacts(artifact_dir: &Path, result: &MatrixCaseResult) -> Result<()> {
+    let result_json = serde_json::to_string_pretty(result)?;
+    std::fs::write(artifact_dir.join("result.json"), result_json)
+        .with_context(|| format!("writing {}", artifact_dir.join("result.json").display()))?;
+    let proof = format!(
+        "case: {}\nfamily: {}\nexpected: {}\nobserved: {}\nverdict: {}\nmessage: {}\n",
+        result.id,
+        result.family,
+        result.expected,
+        result.observed,
+        verdict_label(result.verdict),
+        result.message
+    );
+    std::fs::write(artifact_dir.join("proof.txt"), proof)
+        .with_context(|| format!("writing {}", artifact_dir.join("proof.txt").display()))?;
+    Ok(())
+}
+
+fn write_index_artifact(
+    root: &Path,
+    run_id: &str,
+    mode: MatrixMode,
+    catalog: Catalog,
+    results: &[MatrixCaseResult],
+) -> Result<()> {
+    let index = serde_json::json!({
+        "run_id": run_id,
+        "mode": mode.as_str(),
+        "catalog": catalog.as_str(),
+        "results": results,
+    });
+    std::fs::write(
+        root.join("index.json"),
+        serde_json::to_string_pretty(&index)?,
+    )
+    .with_context(|| format!("writing {}", root.join("index.json").display()))?;
+    let mut md = format!(
+        "# Stores Fake Traversal Matrix\n\nrun_id: `{run_id}`  \\nmode: `{}`  \\ncatalog: `{}`\n\n| Case | Family | Expected | Verdict | Artifact |\n|---|---|---|---|---|\n",
+        mode.as_str(),
+        catalog.as_str()
+    );
+    for result in results {
+        md.push_str(&format!(
+            "| `{}` | {} | {} | {} | `{}` |\n",
+            result.id,
+            result.family,
+            result.expected,
+            verdict_label(result.verdict),
+            result.artifact_dir
+        ));
+    }
+    std::fs::write(root.join("index.md"), md)
+        .with_context(|| format!("writing {}", root.join("index.md").display()))?;
+    Ok(())
+}
+
+fn verdict_label(verdict: MatrixVerdict) -> &'static str {
+    match verdict {
+        MatrixVerdict::Pass => "PASS",
+        MatrixVerdict::Fail => "FAIL",
+        MatrixVerdict::Skip => "SKIP",
+        MatrixVerdict::Error => "ERROR",
+    }
+}
+
+fn matrix_run_id() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("run-{}-{}", now.as_secs(), std::process::id())
+}
+
+fn intentional_red_spec() -> TraversalSpec {
+    TraversalSpec {
+        id: "matrix-intentional-red",
+        family: "matrix-engine",
+        description:
+            "intentional RED row: happy fake traversal with deliberately wrong terminal expectation",
+        expected: "blocked/active (intentional mismatch)",
+        coverage: CoverageTags {
+            schema_edges: vec!["matrix:intentional-red"],
+            runner_outcomes: vec![
+                "planner:PASS",
+                "plan_reviewer:PASS",
+                "executor:PASS",
+                "code_reviewer:PASS",
+                "wrap:PASS",
+                "external_review:PASS",
+            ],
+            perturbations: vec![],
+            authority_events: vec!["task:accept"],
+        },
     }
 }
 
