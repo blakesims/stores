@@ -238,6 +238,9 @@ fn main() -> Result<()> {
                     mode,
                     only: msub.get_one::<String>("only").cloned(),
                     watch: *msub.get_one::<bool>("watch").unwrap_or(&false),
+                    current_ack: *msub
+                        .get_one::<bool>("i-understand-this-mutates-current-repo")
+                        .unwrap_or(&false),
                 })?;
             }
             _ => {

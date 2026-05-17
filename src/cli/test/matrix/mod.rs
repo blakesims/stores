@@ -37,21 +37,22 @@ pub struct EnumerateOpts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MatrixMode {
     Lab,
+    Current,
 }
 
 impl MatrixMode {
     pub fn parse(raw: &str) -> Result<Self> {
         match raw {
             "lab" => Ok(Self::Lab),
-            other => {
-                bail!("unsupported stores test matrix mode '{other}' (Phase 2 MVP supports lab)")
-            }
+            "current" => Ok(Self::Current),
+            other => bail!("unsupported stores test matrix mode '{other}' (expected lab|current)"),
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Lab => "lab",
+            Self::Current => "current",
         }
     }
 }
@@ -62,6 +63,7 @@ pub struct MatrixOpts {
     pub mode: MatrixMode,
     pub only: Option<String>,
     pub watch: bool,
+    pub current_ack: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -284,6 +286,9 @@ pub fn run_enumerate(opts: EnumerateOpts) -> Result<()> {
 }
 
 pub fn run_matrix(opts: MatrixOpts) -> Result<()> {
+    if opts.mode == MatrixMode::Current && !opts.current_ack {
+        bail!("stores test matrix --mode current requires --i-understand-this-mutates-current-repo");
+    }
     let specs = select_matrix_specs(opts.catalog, opts.only.as_deref())?;
     let run_id = matrix_run_id();
     let root = PathBuf::from(".stores").join("test-matrix").join(&run_id);
@@ -395,6 +400,7 @@ fn run_matrix_case(
 ) -> Result<MatrixCaseResult> {
     match mode {
         MatrixMode::Lab => run_lab_case(spec, artifact_dir, watch),
+        MatrixMode::Current => run_current_case(spec, artifact_dir, watch),
     }
 }
 
@@ -436,6 +442,68 @@ fn run_lab_case(
     }
 }
 
+fn run_current_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    match spec.id {
+        "git-stale-base-refuses" => run_current_fake_harness_case(
+            spec,
+            artifact_dir,
+            "stale-base-refuses",
+            watch,
+        ),
+        _ => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: "not-implemented-in-current-mode-mvp".to_string(),
+            verdict: MatrixVerdict::Skip,
+            artifact_dir: artifact_dir.display().to_string(),
+            message: "Current-mode MVP only executes git-stale-base-refuses; use lab mode for local fake harness rows".to_string(),
+        }),
+    }
+}
+
+fn run_current_fake_harness_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    case_name: &str,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let opts = super::TestRunOpts {
+        case_name: Some(case_name.to_string()),
+        case_file: None,
+        delay_ms: Some(0),
+        watch,
+        live: true,
+    };
+    let result = super::run(opts);
+    let artifact_dir_display = artifact_dir.display().to_string();
+    match result {
+        Ok(()) => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: spec.expected.to_string(),
+            verdict: MatrixVerdict::Pass,
+            artifact_dir: artifact_dir_display,
+            message: "current-mode row ran through real current repo daemon path with fake runners only".to_string(),
+        }),
+        Err(err) if is_expectation_mismatch(&err) || is_current_red_proof(&err) => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: err.to_string(),
+            verdict: MatrixVerdict::Fail,
+            artifact_dir: artifact_dir_display,
+            message: format!("RED current-mode substrate mismatch: {err}"),
+        }),
+        Err(err) => Err(err),
+    }
+}
+
 fn run_existing_fake_harness_case(
     spec: &TraversalSpec,
     artifact_dir: &Path,
@@ -473,6 +541,11 @@ fn run_existing_fake_harness_case(
         }),
         Err(err) => Err(err),
     }
+}
+
+fn is_current_red_proof(err: &anyhow::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("stale-base-refuses RED proof")
 }
 
 fn is_expectation_mismatch(err: &anyhow::Error) -> bool {

@@ -283,9 +283,9 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .arg(
                             Arg::new("mode")
                                 .long("mode")
-                                .value_parser(["lab"])
+                                .value_parser(["lab", "current"])
                                 .default_value("lab")
-                                .help("Execution mode (Phase 2 MVP supports lab only)"),
+                                .help("Execution mode: isolated lab (default) or explicit current repo"),
                         )
                         .arg(
                             Arg::new("catalog")
@@ -303,6 +303,12 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .long("watch")
                                 .action(ArgAction::SetTrue)
                                 .help("Print underlying harness progress while executable rows run"),
+                        )
+                        .arg(
+                            Arg::new("i-understand-this-mutates-current-repo")
+                                .long("i-understand-this-mutates-current-repo")
+                                .action(ArgAction::SetTrue)
+                                .help("Required with --mode current; current mode creates real rows/commits in this checkout"),
                         ),
                 ),
         )
