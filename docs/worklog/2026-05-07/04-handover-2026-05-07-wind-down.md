@@ -53,7 +53,7 @@ Key SKILL deltas:
 
 ### Tomorrow's pickup priorities (in order)
 
-1. **Drain the in-flight queue:** T076, T077, T078 will be in `in_review` (or further along) by next session start. Codex + accept (or revise → re-codex) each. Token-mediated accepts (Blake's session token preserved in chat: `a519d2fd9a71f7f6cf79f77d898085c1c84ef253a45b678e2a4ca6a10d02e7b4` — note the L185 doctrine relaxation means this is host-local-bearer, not per-turn-user-presence-bound, going forward).
+1. **Drain the in-flight queue:** T076, T077, T078 will be in `in_review` (or further along) by next session start. Codex + accept (or revise → re-codex) each. Token-mediated accepts (Blake's session token preserved in chat: `<redacted-approval-token>` — note the L185 doctrine relaxation means this is host-local-bearer, not per-turn-user-presence-bound, going forward).
 2. **L186 engine-runner monitor** — Pi-review contract shape; ratify if aligned; promote to T079+. The durable fix for the engine-stall pattern this session surfaced.
 3. **L184 follow-up if T076 surfaces a doctrinal question** about what "stores-private location" means structurally (per-workspace `.stores/bin/` vs `~/.local/share/stores/bin/`).
 

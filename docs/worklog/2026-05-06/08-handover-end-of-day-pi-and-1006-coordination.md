@@ -23,7 +23,7 @@ agent-comm watch /home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-subs
 for id in T038 T044 T045 T046 T047; do echo -n "$id: "; stores tasks status $id; done
 
 # 3. Approval token (session-scoped, in-memory only — NEVER persist):
-# a519d2fd9a71f7f6cf79f77d898085c1c84ef253a45b678e2a4ca6a10d02e7b4
+# <redacted-approval-token>
 ```
 
 ## Working procedure (re-stated)
@@ -131,7 +131,7 @@ Plus L130 fix shipped DIRECT on main (resume routes blocked T2/T3 with plan=null
 
 Session-scoped, in-memory only. **Never persist anywhere on disk.**
 
-`a519d2fd9a71f7f6cf79f77d898085c1c84ef253a45b678e2a4ca6a10d02e7b4`
+`<redacted-approval-token>`
 
 If the user revokes / re-issues, replace this in working memory only — never commit to a file.
 

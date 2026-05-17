@@ -15,7 +15,7 @@ You're inheriting a long session. The doctrine is captured in `.claude/skills/en
    - Pi: `/home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-thread.md`
    - 10.06 client: `/home/blake/repos/.agent-comm/threads/2026-05-06-01-stores-substrate-to-1006.md`
 
-**Approval token (in-memory, never persist):** `a519d2fd9a71f7f6cf79f77d898085c1c84ef253a45b678e2a4ca6a10d02e7b4`. Same Blake-issued session token used all of today.
+**Approval token (in-memory, never persist):** `<redacted-approval-token>`. Same Blake-issued session token used all of today.
 
 **Start of shift:**
 

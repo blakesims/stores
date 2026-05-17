@@ -22,7 +22,7 @@ Today's session: fixed three interlocking substrate bugs (L116, L117, L123) that
 
 ### Standing operating procedure (the user's instructions today)
 
-1. **Semi-autonomous mode.** The user pre-authorized this session with the approval token below. Use `--invoker ai_with_human --approve-token <T>` for U-moments (ratify, accept, resume) without re-asking. Token: `a519d2fd9a71f7f6cf79f77d898085c1c84ef253a45b678e2a4ca6a10d02e7b4` (the user pastes it; treat as session-scoped — do NOT persist anywhere on disk).
+1. **Semi-autonomous mode.** The user pre-authorized this session with the approval token below. Use `--invoker ai_with_human --approve-token <T>` for U-moments (ratify, accept, resume) without re-asking. Token: `<redacted-approval-token>` (the user pastes it; treat as session-scoped — do NOT persist anywhere on disk).
 
 2. **Don't stop unless you must.** Halt only for: (a) genuine cost/architectural trade-off you can't resolve, (b) something you flag as uncertain. Otherwise drive forward through ratify → promote → drive → review → accept → deploy.
 
