@@ -420,6 +420,18 @@ fn run_lab_case(
                 watch,
             )
         }
+        "T3-pr1" => {
+            let case_file = write_plan_review_reject_once_case_file(artifact_dir)?;
+            run_existing_fake_harness_case(spec, artifact_dir, "T3-pr1", Some(case_file), watch)
+        }
+        "T3-cr1" => {
+            let case_file = write_code_review_revise_once_case_file(artifact_dir)?;
+            run_existing_fake_harness_case(spec, artifact_dir, "T3-cr1", Some(case_file), watch)
+        }
+        "T3-er-tooling" => {
+            let case_file = write_er_tooling_case_file(artifact_dir)?;
+            run_existing_fake_harness_case(spec, artifact_dir, "T3-er-tooling", Some(case_file), watch)
+        }
         "matrix-intentional-red" => {
             let case_file = write_intentional_red_case_file(artifact_dir)?;
             run_existing_fake_harness_case(
@@ -437,7 +449,7 @@ fn run_lab_case(
             observed: "not-implemented-in-phase-2-mvp".to_string(),
             verdict: MatrixVerdict::Skip,
             artifact_dir: artifact_dir.display().to_string(),
-            message: "Phase 2 MVP only executes T3-hp-with-substeps and matrix-intentional-red; this row is cataloged for later phases".to_string(),
+            message: "Lab MVP executes T3-hp-with-substeps, T3-pr1, T3-cr1, T3-er-tooling, and matrix-intentional-red; this row is cataloged for later phases".to_string(),
         }),
     }
 }
@@ -587,6 +599,92 @@ fn write_happy_with_substeps_case_file(artifact_dir: &Path) -> Result<PathBuf> {
 "#,
     )
     .with_context(|| format!("writing happy substeps case file {}", path.display()))?;
+    Ok(path)
+}
+
+fn write_plan_review_reject_once_case_file(artifact_dir: &Path) -> Result<PathBuf> {
+    let path = artifact_dir.join("plan-review-reject-once-case.yaml");
+    std::fs::write(
+        &path,
+        r#"cases:
+  T3-pr1:
+    tier: T3
+    executor_mode: marker_file
+    stages:
+      planner: { outcome: PASS }
+      plan_reviewer:
+        attempts:
+          - outcome: NEEDS_WORK
+          - outcome: READY
+      executor: { outcome: PASS }
+      code_reviewer: { outcome: PASS }
+      wrap: { outcome: PASS }
+      external_review: { outcome: PASS }
+    expect:
+      task_status: integrated
+      lifecycle: done
+      external_review_status: passed
+      no_real_llm: true
+"#,
+    )
+    .with_context(|| format!("writing plan-review reject once case file {}", path.display()))?;
+    Ok(path)
+}
+
+fn write_code_review_revise_once_case_file(artifact_dir: &Path) -> Result<PathBuf> {
+    let path = artifact_dir.join("code-review-revise-once-case.yaml");
+    std::fs::write(
+        &path,
+        r#"cases:
+  T3-cr1:
+    tier: T3
+    executor_mode: marker_file
+    stages:
+      planner: { outcome: PASS }
+      plan_reviewer: { outcome: PASS }
+      executor: { outcome: PASS }
+      code_reviewer:
+        attempts:
+          - outcome: REVISE
+          - outcome: PASS
+      wrap: { outcome: PASS }
+      external_review: { outcome: PASS }
+    expect:
+      task_status: integrated
+      lifecycle: done
+      external_review_status: passed
+      no_real_llm: true
+"#,
+    )
+    .with_context(|| format!("writing code-review revise once case file {}", path.display()))?;
+    Ok(path)
+}
+
+fn write_er_tooling_case_file(artifact_dir: &Path) -> Result<PathBuf> {
+    let path = artifact_dir.join("er-tooling-case.yaml");
+    std::fs::write(
+        &path,
+        r#"cases:
+  T3-er-tooling:
+    tier: T3
+    executor_mode: marker_file
+    stages:
+      planner: { outcome: PASS }
+      plan_reviewer: { outcome: PASS }
+      executor: { outcome: PASS }
+      code_reviewer: { outcome: PASS }
+      wrap: { outcome: PASS }
+      external_review:
+        attempts:
+          - outcome: TOOLING_FAILURE
+    expect:
+      task_status: in_review
+      lifecycle: active
+      external_review_status: tooling_held
+      no_real_llm: true
+"#,
+    )
+    .with_context(|| format!("writing ER tooling case file {}", path.display()))?;
     Ok(path)
 }
 
@@ -1027,6 +1125,44 @@ mod tests {
                 "git-stale-base-refuses",
             ]
         );
+    }
+
+    #[test]
+    fn generated_expansion_case_files_parse_expected_outcomes() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let pr = write_plan_review_reject_once_case_file(dir.path()).unwrap();
+        let pr_manifest: crate::cli::test::TestManifest =
+            serde_yaml::from_str(&std::fs::read_to_string(pr).unwrap()).unwrap();
+        let pr_case = &pr_manifest.cases["T3-pr1"];
+        assert_eq!(
+            pr_case.stages["plan_reviewer"].attempts[0].outcome,
+            "NEEDS_WORK"
+        );
+        assert_eq!(
+            pr_case.stages["plan_reviewer"].attempts[1].outcome,
+            "READY"
+        );
+        assert_eq!(pr_case.expect.task_status, "integrated");
+
+        let cr = write_code_review_revise_once_case_file(dir.path()).unwrap();
+        let cr_manifest: crate::cli::test::TestManifest =
+            serde_yaml::from_str(&std::fs::read_to_string(cr).unwrap()).unwrap();
+        let cr_case = &cr_manifest.cases["T3-cr1"];
+        assert_eq!(cr_case.stages["code_reviewer"].attempts[0].outcome, "REVISE");
+        assert_eq!(cr_case.stages["code_reviewer"].attempts[1].outcome, "PASS");
+        assert_eq!(cr_case.expect.task_status, "integrated");
+
+        let er = write_er_tooling_case_file(dir.path()).unwrap();
+        let er_manifest: crate::cli::test::TestManifest =
+            serde_yaml::from_str(&std::fs::read_to_string(er).unwrap()).unwrap();
+        let er_case = &er_manifest.cases["T3-er-tooling"];
+        assert_eq!(
+            er_case.stages["external_review"].attempts[0].outcome,
+            "TOOLING_FAILURE"
+        );
+        assert_eq!(er_case.expect.task_status, "in_review");
+        assert_eq!(er_case.expect.external_review_status, "tooling_held");
     }
 
     #[test]

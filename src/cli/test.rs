@@ -234,7 +234,7 @@ pub fn run(opts: TestRunOpts) -> Result<()> {
         }
     }
 
-    h.assert_expectations(&case.expect)?;
+    h.assert_expectations(&case.expect, &case_name)?;
     if case.expect.no_real_llm {
         h.assert_no_real_llm()?;
     }
@@ -1781,7 +1781,45 @@ impl Harness {
             .context("read task branch")
     }
 
-    fn assert_expectations(&self, expect: &CaseExpect) -> Result<()> {
+    fn assert_expected_agent_run_counts(&self, case_name: &str) -> Result<()> {
+        let count_role = |role: &str| -> Result<i64> {
+            self.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_runs WHERE display_id=?1 AND role=?2",
+                    params![&self.task_id, role],
+                    |r| r.get(0),
+                )
+                .with_context(|| format!("count agent_runs role {role}"))
+        };
+        match case_name {
+            "T3-pr1" => {
+                let planners = count_role("planner")?;
+                let reviewers = count_role("plan_reviewer")?;
+                if planners != 2 || reviewers != 2 {
+                    bail!(
+                        "expected T3-pr1 loop counts planner=2 plan_reviewer=2 got planner={} plan_reviewer={}",
+                        planners,
+                        reviewers
+                    );
+                }
+            }
+            "T3-cr1" => {
+                let executors = count_role("executor")?;
+                let reviewers = count_role("code_reviewer")?;
+                if executors != 2 || reviewers != 2 {
+                    bail!(
+                        "expected T3-cr1 loop counts executor=2 code_reviewer=2 got executor={} code_reviewer={}",
+                        executors,
+                        reviewers
+                    );
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn assert_expectations(&self, expect: &CaseExpect, case_name: &str) -> Result<()> {
         let (status, lifecycle): (String, Option<String>) = self.conn.query_row(
             "SELECT status,lifecycle FROM tasks WHERE display_id=?1",
             [&self.task_id],
@@ -1821,6 +1859,7 @@ impl Harness {
                 }
             }
         }
+        self.assert_expected_agent_run_counts(case_name)?;
         Ok(())
     }
 
