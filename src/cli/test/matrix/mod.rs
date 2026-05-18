@@ -13,7 +13,7 @@ use crate::flow::policies_yaml::PoliciesYaml;
 use crate::flow::{AgentEntry, AgentsYaml, RetryPolicy};
 use crate::handlers::agents_run::{poll_once_with_guard, FsBinaryIdentityProvider};
 use crate::runner::{FakeRunner, Runner};
-use crate::schema::Schema;
+use crate::schema::{actor::Actor, Schema};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Catalog {
@@ -21,6 +21,7 @@ pub enum Catalog {
     Full,
     Queue,
     Battlescars,
+    Upstream,
 }
 
 impl Catalog {
@@ -30,8 +31,9 @@ impl Catalog {
             "full" => Ok(Self::Full),
             "queue" => Ok(Self::Queue),
             "battlescars" => Ok(Self::Battlescars),
+            "upstream" => Ok(Self::Upstream),
             other => bail!(
-                "unknown stores test catalog '{other}' (expected smoke|full|queue|battlescars)"
+                "unknown stores test catalog '{other}' (expected smoke|full|queue|battlescars|upstream)"
             ),
         }
     }
@@ -42,6 +44,7 @@ impl Catalog {
             Self::Full => "full",
             Self::Queue => "queue",
             Self::Battlescars => "battlescars",
+            Self::Upstream => "upstream",
         }
     }
 }
@@ -283,6 +286,7 @@ pub fn catalog_specs(catalog: Catalog) -> Vec<TraversalSpec> {
         }
         Catalog::Queue => queue_specs(),
         Catalog::Battlescars => battlescar_specs(),
+        Catalog::Upstream => upstream_specs(),
     }
 }
 
@@ -476,6 +480,12 @@ fn run_lab_case(
         "stale-external-review-head-mutation" => {
             run_stale_external_review_head_mutation(spec, artifact_dir, watch)
         }
+        "abandon" => run_upstream_abandon_case(spec, artifact_dir, watch),
+        "obs-auto-promote-happy"
+        | "reject-amend"
+        | "close-out-of-band"
+        | "resume-blocked"
+        | "retry-integration" => run_upstream_skip_case(spec, artifact_dir),
         "payload-invalid" => run_expected_harness_error_case(
             spec,
             artifact_dir,
@@ -879,6 +889,73 @@ fn run_stale_external_review_head_mutation(
                     .to_string(),
         }),
     }
+}
+
+fn run_upstream_skip_case(spec: &TraversalSpec, artifact_dir: &Path) -> Result<MatrixCaseResult> {
+    Ok(MatrixCaseResult {
+        id: spec.id.to_string(),
+        family: spec.family.to_string(),
+        expected: spec.expected.to_string(),
+        observed: "explicit-skip/upstream-hard-row".to_string(),
+        verdict: MatrixVerdict::Skip,
+        artifact_dir: artifact_dir.display().to_string(),
+        message: format!(
+            "upstream catalog row {} is cataloged but not executable in the Batch D MVP lab yet",
+            spec.id
+        ),
+    })
+}
+
+fn run_upstream_abandon_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch(SUBSTRATE_DDL)?;
+    let schema = bundled_schema_for_matrix("tasks")?;
+    conn.execute_batch(&ddl_for(&schema))?;
+    seed_human_verb_task_matrix(&conn, "HU001", "planning")?;
+
+    let cmd = clap::Command::new("abandon")
+        .arg(clap::Arg::new("display_id").required(true).index(1))
+        .arg(clap::Arg::new("reason").long("reason").required(true));
+    let matches = cmd.get_matches_from(["abandon", "HU001", "--reason", "matrix-abandon-lab"]);
+    crate::handlers::transition::run_abandon(
+        &schema,
+        &conn,
+        &matches,
+        Actor::Human.into(),
+        "matrix-abandon-lab",
+    )?;
+
+    let status = task_status_matrix(&conn, "HU001");
+    let (lifecycle, active_step, reason): (String, String, String) = conn.query_row(
+        "SELECT lifecycle, active_step, abandoned_reason FROM tasks WHERE display_id='HU001'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let history_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM transition_history WHERE store='tasks' AND display_id='HU001' AND from_status='planning' AND to_status='abandoned' AND verb='abandon' AND invoker='human'",
+        [],
+        |r| r.get(0),
+    )?;
+    if status != "abandoned" || reason != "matrix-abandon-lab" || history_count != 1 {
+        bail!(
+            "abandon lab mismatch: status={status} lifecycle={lifecycle} active_step={active_step} reason={reason:?} history_count={history_count}"
+        );
+    }
+    if watch {
+        println!(
+            "upstream abandon HU001 status={status} lifecycle={lifecycle} active_step={active_step} history_count={history_count}"
+        );
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "HU001 planning→abandoned via real run_abandon handler",
+        "real human-verb lab fired the abandon transition handler and verified status, reason, and transition_history",
+    ))
 }
 
 fn run_dirty_worktree_refusal(
@@ -1344,6 +1421,18 @@ fn git_sha_matrix(repo: &Path, rev: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+fn seed_human_verb_task_matrix(conn: &Connection, display_id: &str, status: &str) -> Result<()> {
+    let now = "2026-05-18T00:00:00Z";
+    let contract =
+        r#"{"done_when":"human verb matrix","scope_in":"fake upstream matrix","scope_out":"production"}"#;
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, slug, contract, activation, lifecycle, active_step, integration_step, blocked, blocked_reason, created_at, updated_at, created_by, updated_by) \
+         VALUES (?1, ?2, 'stores test human verb', 'stores-test-human-verb', ?3, 'active', 'active', 'planning', 'none', 0, '', ?4, ?4, 'stores-test', 'stores-test')",
+        params![display_id, status, contract, now],
+    )?;
+    Ok(())
+}
+
 fn seed_queued_task_matrix(
     conn: &Connection,
     display_id: &str,
@@ -1565,6 +1654,86 @@ fn intentional_red_spec() -> TraversalSpec {
             authority_events: vec!["task:accept"],
         },
     }
+}
+
+fn upstream_specs() -> Vec<TraversalSpec> {
+    vec![
+        TraversalSpec {
+            id: "obs-auto-promote-happy",
+            family: "upstream",
+            description: "ready observation contract auto-promotes into a task",
+            expected: "skip/auto-promote-lab-not-wired-yet",
+            coverage: CoverageTags {
+                schema_edges: vec!["observations:ready:auto-promote:ready"],
+                runner_outcomes: vec![],
+                perturbations: vec![],
+                authority_events: vec!["observation:approve-contract"],
+            },
+        },
+        TraversalSpec {
+            id: "reject-amend",
+            family: "human-verb",
+            description: "human rejects an in-review task and an amended contract reopens planning",
+            expected: "skip/reject-amend-lab-not-wired-yet",
+            coverage: CoverageTags {
+                schema_edges: vec![
+                    "tasks:in_review:reject:rejected",
+                    "tasks:rejected:amend:planning",
+                ],
+                runner_outcomes: vec![],
+                perturbations: vec![],
+                authority_events: vec!["task:reject", "task:amend"],
+            },
+        },
+        TraversalSpec {
+            id: "abandon",
+            family: "human-verb",
+            description: "human abandons a non-terminal task through the real transition handler",
+            expected: "abandoned",
+            coverage: CoverageTags {
+                schema_edges: vec!["tasks:planning:abandon:abandoned"],
+                runner_outcomes: vec![],
+                perturbations: vec![],
+                authority_events: vec!["task:abandon"],
+            },
+        },
+        TraversalSpec {
+            id: "close-out-of-band",
+            family: "human-verb",
+            description: "human closes a task as shipped outside the substrate",
+            expected: "skip/close-out-of-band-git-lab-not-wired-yet",
+            coverage: CoverageTags {
+                schema_edges: vec!["tasks:planning:close-out-of-band:closed_out_of_band"],
+                runner_outcomes: vec![],
+                perturbations: vec!["git:main_reachable_commit"],
+                authority_events: vec!["task:close-out-of-band"],
+            },
+        },
+        TraversalSpec {
+            id: "resume-blocked",
+            family: "human-verb",
+            description: "human resumes a blocked task back to planning",
+            expected: "skip/resume-lab-not-wired-yet",
+            coverage: CoverageTags {
+                schema_edges: vec!["tasks:blocked:resume:planning"],
+                runner_outcomes: vec![],
+                perturbations: vec!["task:blocked"],
+                authority_events: vec!["task:resume"],
+            },
+        },
+        TraversalSpec {
+            id: "retry-integration",
+            family: "human-verb",
+            description: "human retries a typed integration-blocked task back into the queue",
+            expected: "skip/retry-integration-lab-not-wired-yet",
+            coverage: CoverageTags {
+                schema_edges: vec!["tasks:integration_blocked:retry-integration:integration_queued"],
+                runner_outcomes: vec![],
+                perturbations: vec!["task:integration_blocked"],
+                authority_events: vec!["task:retry-integration"],
+            },
+        },
+    ]
 }
 
 fn battlescar_specs() -> Vec<TraversalSpec> {
@@ -2148,6 +2317,59 @@ mod tests {
                 "stale-dead-current-run-marker",
             ]
         );
+    }
+
+    #[test]
+    fn upstream_catalog_lists_batch_d_cases() {
+        assert_eq!(Catalog::parse("upstream").unwrap(), Catalog::Upstream);
+        assert_eq!(Catalog::Upstream.as_str(), "upstream");
+
+        let ids: Vec<_> = catalog_specs(Catalog::Upstream)
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "obs-auto-promote-happy",
+                "reject-amend",
+                "abandon",
+                "close-out-of-band",
+                "resume-blocked",
+                "retry-integration",
+            ]
+        );
+    }
+
+    #[test]
+    fn upstream_matrix_lab_output_runs_abandon_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("matrix-output");
+        run_matrix_to_root(
+            MatrixOpts {
+                catalog: Catalog::Upstream,
+                mode: MatrixMode::Lab,
+                only: Some("abandon".to_string()),
+                watch: false,
+                current_ack: false,
+            },
+            "unit-upstream-run",
+            &root,
+        )
+        .unwrap();
+
+        let index: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("index.json")).unwrap())
+                .unwrap();
+        assert_eq!(index["mode"], "lab");
+        assert_eq!(index["catalog"], "upstream");
+        assert_eq!(index["results"][0]["id"], "abandon");
+        assert_eq!(index["results"][0]["verdict"], "PASS");
+
+        let report = std::fs::read_to_string(root.join("index.md")).unwrap();
+        assert!(report.contains("catalog: `upstream`"));
+        assert!(report.contains("`abandon`"));
+        assert!(root.join("abandon").join("proof.txt").exists());
     }
 
     #[test]
