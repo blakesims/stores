@@ -246,12 +246,48 @@ The goal is to complete the windtunnel enough that it is broadly useful, not jus
 
 ### Batch A — Fix current RED and queue protocol foundation
 
+Batch A implementation contract after oracle review:
+
+- **No new task state.** Minimal `NeedsReview` maps to the existing `integration_blocked` state via `mark_integration_blocked` / existing integration-blocking machinery.
+- **Typed decision storage:** canonical per-attempt evidence lives in `tasks.integration_attempts[-1]`; operator-facing summary is copied into `tasks.integration_blocked_reason`.
+- **Minimal conservative classifier only:** no `RefreshOnly`, no `RetestRequired`, no auto-review in Batch A.
+- **Full serial queue assumption for now:** only one row is actively `integrating`; queued-behind rows remain `integration_queued` and are classified only after acquiring the integration slot.
+- **Lock/postcondition finalization is part of correctness:** a row is not GREEN if it still has an unfinished integrate lock, null/unfinished integration attempt, or `integrating/task_review` limbo with no next action.
+
+Minimal Batch A classifier decisions:
+
+```text
+reviewed base unreachable     -> Blocked(stale_base_history_rewrite)
+refresh/rebase conflict       -> Blocked(conflict)
+reviewed head != current head -> NeedsReview(branch_head_changed/stale_external_review)
+main moved after review       -> NeedsReview(main_moved_after_review)
+else                          -> Fresh
+```
+
+`NeedsReview` target shape for Batch A:
+
+```text
+status = integration_blocked
+lifecycle = integration
+integration_step = none
+blocked = true
+blocker_kind = main_red
+integration_blocked_reason contains "needs_review" or "stale_external_review"
+integration_attempts[-1].outcome = "needs_review"
+integration_attempts[-1].freshness_decision = "NeedsReview"
+integration_attempts[-1].freshness_reason = <typed reason>
+integration_attempts[-1].next_action = "request_fresh_review"
+integration_attempts[-1].completed_at nonempty
+integrate/dispatch lock finalized
+no_real_llm = true
+```
+
 Deliverables:
 
-1. Minimal pure freshness classifier with unit tests.
+1. Minimal pure freshness classifier with unit tests using only existing/easy inputs: reviewed base/head, candidate head before/after refresh, current main, base reachability, refresh result.
 2. Integration consumes classifier at front-of-queue.
 3. Stale/no-fresh cases finalize/release integration locks and record typed `freshness_decision` / `next_action` evidence.
-4. Update `git-stale-base-refuses` matrix expectation to “must not integrate, must not wedge, must emit typed decision.”
+4. Update `git-stale-base-refuses` matrix expectation to “must not integrate, must not wedge, must emit typed `NeedsReview` decision.”
 5. Current-mode row flips RED→GREEN.
 
 Acceptance:
@@ -261,7 +297,7 @@ cargo test -q freshness --bin stores
 cargo test -q cli::test --bin stores
 stores test matrix --mode current --only git-stale-base-refuses \
   --watch --i-understand-this-mutates-current-repo
-# PASS, no real LLM, no wedge
+# PASS, no real LLM, no wedge, typed NeedsReview evidence
 ```
 
 ### Batch B — Queue matrix rows
