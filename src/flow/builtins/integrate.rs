@@ -347,15 +347,17 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         )],
     )?;
     let affected_scope = git_changed_paths(&workspace_buf, &base_main_sha, &candidate_head_after)?;
-    write_refresh_freshness_inputs(ctx.conn, display_id, &candidate_head_after, &affected_scope)?;
-    fire_integration_step(ctx, &tasks_schema, display_id, "mark_refresh_done")?;
 
-    // 6. ER head-freshness re-check (T2/T3). Skip when no passed ER row.
+    // Batch A: if refresh/rebase changed the candidate head relative to the
+    // reviewed ER head, the candidate is no longer review-fresh. Route to a
+    // typed NeedsReview state before advancing integration_step to task_review;
+    // the historical wedge was `mark_refresh_done` followed by an unfinished
+    // integrate lock and null integration_attempts.
     if let Some(er) = latest_passed_er_row(ctx.conn, display_id)? {
         let er_head = er.head_sha.clone().unwrap_or_default();
         if !er_head.is_empty() && er_head != candidate_head_after {
             let summary = format!(
-                "ER {} reviewed head {} but candidate is now {}; superseded",
+                "ER {} reviewed head {} but candidate is now {}; fresh review required",
                 er.display_id,
                 short_sha(&er_head),
                 short_sha(&candidate_head_after)
@@ -363,24 +365,21 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
             update_last_attempt(
                 ctx.conn,
                 display_id,
-                &[
-                    ("completed_at", Value::String(now_iso8601())),
-                    (
-                        "outcome",
-                        Value::String("stale_external_review".to_string()),
-                    ),
-                    ("pre_land_check_summary", Value::String(summary.clone())),
-                ],
+                &[("reviewed_base_sha", Value::String(er.base_sha.unwrap_or_default()))],
             )?;
-            supersede_external_review(ctx, &er.display_id)?;
-            fire_mark_integration_blocked(
+            complete_needs_review(
                 ctx,
                 display_id,
-                &format!("stale_external_review: {}", summary),
+                "stale_external_review",
+                &affected_scope,
+                &summary,
             )?;
             return Ok(0);
         }
     }
+
+    write_refresh_freshness_inputs(ctx.conn, display_id, &candidate_head_after, &affected_scope)?;
+    fire_integration_step(ctx, &tasks_schema, display_id, "mark_refresh_done")?;
 
     write_review_freshness_inputs(ctx.conn, display_id, &base_main_sha, &candidate_head_after)?;
     fire_integration_step(ctx, &tasks_schema, display_id, "mark_task_review_done")?;
@@ -495,17 +494,35 @@ pub fn run(row: &Value, ctx: &DispatchCtx) -> BuiltinResult {
         FreshnessOutcome::Ready => {}
         FreshnessOutcome::StaleRequiresRefresh(scope) => {
             lock_guard.release()?;
-            reset_for_stale_freshness(ctx.conn, display_id, "refresh", "refreshing", &scope)?;
+            complete_needs_review(
+                ctx,
+                display_id,
+                "main_moved_after_review",
+                &scope,
+                "refresh evidence is stale after main moved; request fresh review before landing",
+            )?;
             return Ok(0);
         }
         FreshnessOutcome::StaleRequiresRereview(scope) => {
             lock_guard.release()?;
-            reset_for_stale_freshness(ctx.conn, display_id, "review", "task_review", &scope)?;
+            complete_needs_review(
+                ctx,
+                display_id,
+                "main_moved_after_review",
+                &scope,
+                "review evidence is stale after main moved; request fresh review before landing",
+            )?;
             return Ok(0);
         }
         FreshnessOutcome::StaleRequiresRetest(scope) => {
             lock_guard.release()?;
-            reset_for_stale_freshness(ctx.conn, display_id, "test", "testing", &scope)?;
+            complete_needs_review(
+                ctx,
+                display_id,
+                "test_evidence_stale",
+                &scope,
+                "test evidence is stale after main moved; request fresh review/test before landing",
+            )?;
             return Ok(0);
         }
     }
@@ -748,26 +765,64 @@ fn task_row_value(conn: &rusqlite::Connection, display_id: &str) -> Result<Value
     Ok(Value::Object(obj))
 }
 
-fn reset_for_stale_freshness(
-    conn: &rusqlite::Connection,
+fn complete_needs_review(
+    ctx: &DispatchCtx,
     display_id: &str,
-    dim: &str,
-    integration_step: &str,
+    reason: &str,
     scope: &[String],
+    summary: &str,
 ) -> Result<()> {
-    let reason = format!("stale_{dim}");
-    let summary = if scope.is_empty() {
-        reason
+    let scope_value = Value::Array(scope.iter().cloned().map(Value::String).collect());
+    let full_summary = if scope.is_empty() {
+        format!("needs_review:{reason}: {summary}")
     } else {
-        format!("{}: {}", reason, scope.join(","))
+        format!("needs_review:{reason}: {}; scope={}", summary, scope.join(","))
     };
-    conn.execute(
-        "UPDATE tasks SET lifecycle='integration', active_step='none', status='integrating', \
-         integration_step=?1, blocked=0, blocker_kind=NULL, integration_blocked_reason=?2 \
-         WHERE display_id=?3",
-        params![integration_step, summary, display_id],
-    )?;
-    Ok(())
+    if current_attempt_count(ctx.conn, display_id)? == 0 {
+        let now = now_iso8601();
+        let entry = json!({
+            "attempt_no": 1,
+            "started_at": now,
+            "base_main_sha": "",
+            "candidate_head_before": "",
+            "candidate_head_after": "",
+            "landed_main_sha": "",
+            "refresh_strategy": "",
+            "pre_land_check_summary": full_summary,
+            "reviewed_base_sha": "",
+            "outcome": "needs_review",
+            "freshness_decision": "NeedsReview",
+            "freshness_reason": reason,
+            "freshness_scope": scope_value,
+            "next_action": "request_fresh_review",
+            "completed_at": now_iso8601(),
+        });
+        append_attempt_entry(ctx.conn, display_id, &entry)?;
+    } else {
+        update_last_attempt(
+            ctx.conn,
+            display_id,
+            &[
+                ("completed_at", Value::String(now_iso8601())),
+                ("outcome", Value::String("needs_review".to_string())),
+                (
+                    "freshness_decision",
+                    Value::String("NeedsReview".to_string()),
+                ),
+                ("freshness_reason", Value::String(reason.to_string())),
+                ("freshness_scope", scope_value),
+                (
+                    "next_action",
+                    Value::String("request_fresh_review".to_string()),
+                ),
+                (
+                    "pre_land_check_summary",
+                    Value::String(full_summary.clone()),
+                ),
+            ],
+        )?;
+    }
+    fire_mark_integration_blocked(ctx, display_id, &full_summary)
 }
 
 fn fire_testing_done_when_merge_free(
@@ -908,7 +963,14 @@ fn append_attempt_entry(
     let entry_json = serde_json::to_string(entry)?;
     conn.execute(
         "UPDATE tasks SET integration_attempts = \
-           json_insert(COALESCE(integration_attempts, json('[]')), '$[#]', json(?1)) \
+           json_insert(\
+             CASE \
+               WHEN integration_attempts IS NULL OR json_type(integration_attempts) = 'null' \
+               THEN json('[]') \
+               ELSE integration_attempts \
+             END, \
+             '$[#]', json(?1)\
+           ) \
          WHERE display_id=?2",
         params![entry_json, display_id],
     )?;
@@ -1691,8 +1753,7 @@ mod tests {
     }
 
     /// (e) ER stale-PASS HEAD path: latest passed ER references an old head;
-    /// post-rebase head differs → outcome='stale_external_review'; ER row
-    /// transitions to 'superseded'.
+    /// post-rebase head differs → outcome='needs_review'.
     #[test]
     fn e_stale_external_review_head() {
         let conn = fresh_db();
@@ -1738,7 +1799,11 @@ mod tests {
         assert_eq!(status, "integration_blocked");
         assert_eq!(
             json_extract_str(&conn, "T500", "$[#-1].outcome").as_deref(),
-            Some("stale_external_review")
+            Some("needs_review")
+        );
+        assert_eq!(
+            json_extract_str(&conn, "T500", "$[#-1].freshness_decision").as_deref(),
+            Some("NeedsReview")
         );
         let er_status: String = conn
             .query_row(
@@ -1747,7 +1812,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(er_status, "superseded");
+        assert_eq!(er_status, "passed");
     }
 
     /// (f) Retry replay: after one integration_blocked, retry → integrated.

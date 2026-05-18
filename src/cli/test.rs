@@ -936,7 +936,7 @@ impl LiveHarness {
         for _ in 0..20 {
             match crate::db::open(&self.db_path) {
                 Ok(conn) => return Ok(conn),
-                Err(err) if err.to_string().to_ascii_lowercase().contains("locked") => {
+                Err(err) if error_chain_contains_locked(&err) => {
                     last_err = Some(err);
                     std::thread::sleep(std::time::Duration::from_millis(250));
                 }
@@ -1227,6 +1227,11 @@ fn live_table_has_column(conn: &Connection, table: &str, column: &str) -> Result
     Ok(false)
 }
 
+fn error_chain_contains_locked(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:?}").to_ascii_lowercase();
+    msg.contains("database") && msg.contains("locked")
+}
+
 fn run_live_stores_cmd<const N: usize>(root: &Path, args: [&str; N], label: &str) -> Result<()> {
     let out = run_live_stores_cmd_output(root, args, label)?;
     if !out.success {
@@ -1268,6 +1273,8 @@ fn is_freshness_refusal(text: &str) -> bool {
         || normalized.contains("stale external review")
         || normalized.contains("stale_base")
         || normalized.contains("freshness")
+        || normalized.contains("needs_review")
+        || normalized.contains("needs review")
         || normalized.contains("stale_review")
         || normalized.contains("stale review")
         || normalized.contains("stale_test")
