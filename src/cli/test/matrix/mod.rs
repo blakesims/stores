@@ -20,6 +20,7 @@ pub enum Catalog {
     Smoke,
     Full,
     Queue,
+    Battlescars,
 }
 
 impl Catalog {
@@ -28,7 +29,10 @@ impl Catalog {
             "smoke" => Ok(Self::Smoke),
             "full" => Ok(Self::Full),
             "queue" => Ok(Self::Queue),
-            other => bail!("unknown stores test catalog '{other}' (expected smoke|full|queue)"),
+            "battlescars" => Ok(Self::Battlescars),
+            other => bail!(
+                "unknown stores test catalog '{other}' (expected smoke|full|queue|battlescars)"
+            ),
         }
     }
 
@@ -37,6 +41,7 @@ impl Catalog {
             Self::Smoke => "smoke",
             Self::Full => "full",
             Self::Queue => "queue",
+            Self::Battlescars => "battlescars",
         }
     }
 }
@@ -277,6 +282,7 @@ pub fn catalog_specs(catalog: Catalog) -> Vec<TraversalSpec> {
             specs
         }
         Catalog::Queue => queue_specs(),
+        Catalog::Battlescars => battlescar_specs(),
     }
 }
 
@@ -453,12 +459,40 @@ fn run_lab_case(
         }
         "T3-er-tooling" => {
             let case_file = write_er_tooling_case_file(artifact_dir)?;
-            run_existing_fake_harness_case(spec, artifact_dir, "T3-er-tooling", Some(case_file), watch)
+            run_existing_fake_harness_case(
+                spec,
+                artifact_dir,
+                "T3-er-tooling",
+                Some(case_file),
+                watch,
+            )
         }
         "queue-two-happy" => run_queue_two_happy(spec, artifact_dir, watch),
         "queue-overlap-needs-review" => run_queue_overlap_needs_review(spec, artifact_dir, watch),
         "queue-branch-head-changed" => run_queue_branch_head_changed(spec, artifact_dir, watch),
         "queue-conflict-blocked" => run_queue_conflict_blocked(spec, artifact_dir, watch),
+        "dirty-worktree-refusal" => run_dirty_worktree_refusal(spec, artifact_dir, watch),
+        "merge-conflict-blocked" => run_queue_conflict_blocked(spec, artifact_dir, watch),
+        "stale-external-review-head-mutation" => {
+            run_stale_external_review_head_mutation(spec, artifact_dir, watch)
+        }
+        "payload-invalid" => run_expected_harness_error_case(
+            spec,
+            artifact_dir,
+            write_runner_battlescar_case_file(artifact_dir, spec.id, "PAYLOAD_INVALID")?,
+            watch,
+            "payload",
+            "runner payload invalid output was classified as a blocked task",
+        ),
+        "nonzero-exit" => run_expected_harness_error_case(
+            spec,
+            artifact_dir,
+            write_runner_battlescar_case_file(artifact_dir, spec.id, "NONZERO_EXIT")?,
+            watch,
+            "non-zero exit",
+            "runner nonzero exit was classified as a blocked task",
+        ),
+        "no-heartbeat" => run_no_heartbeat_case(spec, artifact_dir, watch),
         "matrix-intentional-red" => {
             let case_file = write_intentional_red_case_file(artifact_dir)?;
             run_existing_fake_harness_case(
@@ -476,7 +510,10 @@ fn run_lab_case(
             observed: "not-implemented-in-phase-2-mvp".to_string(),
             verdict: MatrixVerdict::Skip,
             artifact_dir: artifact_dir.display().to_string(),
-            message: "Lab MVP executes T3-hp-with-substeps, T3-pr1, T3-cr1, T3-er-tooling, and matrix-intentional-red; this row is cataloged for later phases".to_string(),
+            message: format!(
+                "case {} is cataloged but not executable in this matrix mode yet",
+                spec.id
+            ),
         }),
     }
 }
@@ -823,6 +860,147 @@ fn run_queue_conflict_blocked(
     ))
 }
 
+fn run_stale_external_review_head_mutation(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    match run_queue_branch_head_changed(spec, artifact_dir, watch) {
+        Ok(result) => Ok(result),
+        Err(err) => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: format!("{err:#}"),
+            verdict: MatrixVerdict::Fail,
+            artifact_dir: artifact_dir.display().to_string(),
+            message:
+                "RED: stale external-review head mutation did not reach typed NeedsReview cleanly"
+                    .to_string(),
+        }),
+    }
+}
+
+fn run_dirty_worktree_refusal(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let lab = QueueLab::new()?;
+    lab.branch_file_commit(
+        "feat/dirty",
+        "dirty.txt",
+        "branch version\n",
+        "dirty branch change",
+    )?;
+    git_ok(&lab.repo, &["checkout", "main"])?;
+    std::fs::write(lab.repo.join("dirty.txt"), "uncommitted main version\n")?;
+    lab.seed_task("BD001", "feat/dirty")?;
+    lab.drive_until(10, |conn| {
+        task_status_matrix(conn, "BD001") == "integration_blocked"
+    })?;
+    let outcome = lab.attempt_field("BD001", "outcome")?.unwrap_or_default();
+    let reason = lab.blocked_reason("BD001")?;
+    if outcome != "merge_failure" || !reason.contains("checkout") {
+        bail!("expected dirty checkout merge_failure, got outcome={outcome:?} reason={reason:?}");
+    }
+    if watch {
+        println!(
+            "dirty-worktree-refusal outcome={} reason={}",
+            outcome, reason
+        );
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "BD001 integration_blocked/merge_failure",
+        "dirty worktree caused real git checkout refusal and routed to integration_blocked",
+    ))
+}
+
+fn run_expected_harness_error_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    case_file: PathBuf,
+    watch: bool,
+    expected_error_fragment: &str,
+    pass_message: &str,
+) -> Result<MatrixCaseResult> {
+    let opts = super::TestRunOpts {
+        case_name: Some(spec.id.to_string()),
+        case_file: Some(case_file),
+        delay_ms: Some(0),
+        watch,
+        live: false,
+    };
+    match super::run(opts) {
+        Ok(()) => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: "unexpected-success".to_string(),
+            verdict: MatrixVerdict::Fail,
+            artifact_dir: artifact_dir.display().to_string(),
+            message: format!("expected harness error containing {expected_error_fragment:?}"),
+        }),
+        Err(err) if format!("{err:#}").contains(expected_error_fragment) => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: format!("{err:#}"),
+            verdict: MatrixVerdict::Pass,
+            artifact_dir: artifact_dir.display().to_string(),
+            message: pass_message.to_string(),
+        }),
+        Err(err) => Err(err),
+    }
+}
+
+fn run_no_heartbeat_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let old_timeout = std::env::var_os("STORES_RUNNER_NO_OUTPUT_SECS");
+    std::env::set_var("STORES_RUNNER_NO_OUTPUT_SECS", "1");
+    let case_file = write_runner_battlescar_case_file(artifact_dir, spec.id, "STALL_NO_HEARTBEAT")?;
+    let opts = super::TestRunOpts {
+        case_name: Some(spec.id.to_string()),
+        case_file: Some(case_file),
+        delay_ms: Some(2000),
+        watch,
+        live: false,
+    };
+    let result = match super::run(opts) {
+        Ok(()) => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: "unexpected-success".to_string(),
+            verdict: MatrixVerdict::Fail,
+            artifact_dir: artifact_dir.display().to_string(),
+            message: "expected no-heartbeat harness timeout".to_string(),
+        }),
+        Err(err) if format!("{err:#}").contains("timed out") => Ok(MatrixCaseResult {
+            id: spec.id.to_string(),
+            family: spec.family.to_string(),
+            expected: spec.expected.to_string(),
+            observed: format!("{err:#}"),
+            verdict: MatrixVerdict::Pass,
+            artifact_dir: artifact_dir.display().to_string(),
+            message:
+                "runner with no heartbeat/no output was classified as a blocked liveness failure"
+                    .to_string(),
+        }),
+        Err(err) => Err(err),
+    };
+    match old_timeout {
+        Some(value) => std::env::set_var("STORES_RUNNER_NO_OUTPUT_SECS", value),
+        None => std::env::remove_var("STORES_RUNNER_NO_OUTPUT_SECS"),
+    }
+    result
+}
+
 fn run_current_case(
     spec: &TraversalSpec,
     artifact_dir: &Path,
@@ -1068,6 +1246,33 @@ fn write_er_tooling_case_file(artifact_dir: &Path) -> Result<PathBuf> {
 "#,
     )
     .with_context(|| format!("writing ER tooling case file {}", path.display()))?;
+    Ok(path)
+}
+
+fn write_runner_battlescar_case_file(
+    artifact_dir: &Path,
+    case_id: &str,
+    planner_outcome: &str,
+) -> Result<PathBuf> {
+    let path = artifact_dir.join(format!("{case_id}-case.yaml"));
+    std::fs::write(
+        &path,
+        format!(
+            r#"cases:
+  {case_id}:
+    tier: T3
+    executor_mode: marker_file
+    stages:
+      planner: {{ outcome: {planner_outcome} }}
+    expect:
+      task_status: blocked
+      lifecycle: active
+      external_review_status: missing
+      no_real_llm: true
+"#
+        ),
+    )
+    .with_context(|| format!("writing battlescar runner case file {}", path.display()))?;
     Ok(path)
 }
 
@@ -1360,6 +1565,113 @@ fn intentional_red_spec() -> TraversalSpec {
             authority_events: vec!["task:accept"],
         },
     }
+}
+
+fn battlescar_specs() -> Vec<TraversalSpec> {
+    vec![
+        TraversalSpec {
+            id: "dirty-worktree-refusal",
+            family: "git-liveness",
+            description: "dirty worktree blocks checkout before integration refresh",
+            expected: "integration-blocked/dirty-worktree",
+            coverage: CoverageTags {
+                schema_edges: vec![
+                    "tasks:integrating:mark_integration_blocked:integration_blocked",
+                ],
+                runner_outcomes: vec![],
+                perturbations: vec!["git:dirty_worktree"],
+                authority_events: vec!["policy:integration_queue"],
+            },
+        },
+        TraversalSpec {
+            id: "merge-conflict-blocked",
+            family: "git-liveness",
+            description: "front-of-queue merge/rebase conflict blocks integration cleanly",
+            expected: "integration-blocked/conflict",
+            coverage: CoverageTags {
+                schema_edges: vec![
+                    "tasks:integrating:mark_integration_blocked:integration_blocked",
+                ],
+                runner_outcomes: vec!["executor:marker_commit"],
+                perturbations: vec!["git:merge_conflict"],
+                authority_events: vec!["policy:integration_queue"],
+            },
+        },
+        TraversalSpec {
+            id: "stale-external-review-head-mutation",
+            family: "freshness",
+            description: "candidate head mutates after external review and requires fresh review",
+            expected: "needs-review",
+            coverage: CoverageTags {
+                schema_edges: vec![
+                    "tasks:integrating:mark_integration_blocked:integration_blocked",
+                ],
+                runner_outcomes: vec!["external_review:PASS"],
+                perturbations: vec!["git:branch_head_changed_after_review"],
+                authority_events: vec!["policy:external_review_freshness"],
+            },
+        },
+        TraversalSpec {
+            id: "payload-invalid",
+            family: "runner-liveness",
+            description: "runner exits 0 with invalid structured payload and blocks task",
+            expected: "blocked/payload-invalid",
+            coverage: CoverageTags {
+                schema_edges: vec!["tasks:planning:mark_drive_failed:blocked"],
+                runner_outcomes: vec!["planner:PAYLOAD_INVALID_EXIT_0"],
+                perturbations: vec!["runner:invalid_payload"],
+                authority_events: vec![],
+            },
+        },
+        TraversalSpec {
+            id: "nonzero-exit",
+            family: "runner-liveness",
+            description: "runner exits nonzero and blocks task with structured runner_crash reason",
+            expected: "blocked/nonzero-exit",
+            coverage: CoverageTags {
+                schema_edges: vec!["tasks:planning:mark_drive_failed:blocked"],
+                runner_outcomes: vec!["planner:NONZERO_EXIT"],
+                perturbations: vec!["runner:nonzero_exit"],
+                authority_events: vec![],
+            },
+        },
+        TraversalSpec {
+            id: "no-heartbeat",
+            family: "runner-liveness",
+            description: "runner produces no heartbeat/output and timeout blocks task",
+            expected: "blocked/no-heartbeat",
+            coverage: CoverageTags {
+                schema_edges: vec!["tasks:planning:mark_drive_failed:blocked"],
+                runner_outcomes: vec!["planner:STALL_NO_HEARTBEAT"],
+                perturbations: vec!["runner:no_heartbeat"],
+                authority_events: vec![],
+            },
+        },
+        TraversalSpec {
+            id: "duplicate-drive-refusal",
+            family: "drive-liveness",
+            description: "duplicate drive owner is refused instead of starting a second drive",
+            expected: "skip/manual-drive-cli-not-in-matrix-yet",
+            coverage: CoverageTags {
+                schema_edges: vec![],
+                runner_outcomes: vec![],
+                perturbations: vec!["drive:duplicate_owner"],
+                authority_events: vec![],
+            },
+        },
+        TraversalSpec {
+            id: "stale-dead-current-run-marker",
+            family: "drive-liveness",
+            description: "stale/dead current-run marker truth is classified without wedging",
+            expected: "skip/current-run-marker-lab-not-wired-yet",
+            coverage: CoverageTags {
+                schema_edges: vec![],
+                runner_outcomes: vec![],
+                perturbations: vec!["drive:stale_dead_marker"],
+                authority_events: vec![],
+            },
+        },
+    ]
 }
 
 fn queue_specs() -> Vec<TraversalSpec> {
@@ -1810,6 +2122,30 @@ mod tests {
                 "queue-overlap-needs-review",
                 "queue-branch-head-changed",
                 "queue-conflict-blocked",
+            ]
+        );
+    }
+
+    #[test]
+    fn battlescar_catalog_lists_batch_c_cases() {
+        assert_eq!(Catalog::parse("battlescars").unwrap(), Catalog::Battlescars);
+        assert_eq!(Catalog::Battlescars.as_str(), "battlescars");
+
+        let ids: Vec<_> = catalog_specs(Catalog::Battlescars)
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "dirty-worktree-refusal",
+                "merge-conflict-blocked",
+                "stale-external-review-head-mutation",
+                "payload-invalid",
+                "nonzero-exit",
+                "no-heartbeat",
+                "duplicate-drive-refusal",
+                "stale-dead-current-run-marker",
             ]
         );
     }
