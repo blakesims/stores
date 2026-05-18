@@ -1,14 +1,25 @@
 #![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
+use crate::flow::agents_yaml::{Subscription, TransitionEdge};
+use crate::flow::policies_yaml::PoliciesYaml;
+use crate::flow::{AgentEntry, AgentsYaml, RetryPolicy};
+use crate::handlers::agents_run::{poll_once_with_guard, FsBinaryIdentityProvider};
+use crate::runner::{FakeRunner, Runner};
+use crate::schema::Schema;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Catalog {
     Smoke,
     Full,
+    Queue,
 }
 
 impl Catalog {
@@ -16,7 +27,8 @@ impl Catalog {
         match raw {
             "smoke" => Ok(Self::Smoke),
             "full" => Ok(Self::Full),
-            other => bail!("unknown stores test catalog '{other}' (expected smoke|full)"),
+            "queue" => Ok(Self::Queue),
+            other => bail!("unknown stores test catalog '{other}' (expected smoke|full|queue)"),
         }
     }
 
@@ -24,6 +36,7 @@ impl Catalog {
         match self {
             Self::Smoke => "smoke",
             Self::Full => "full",
+            Self::Queue => "queue",
         }
     }
 }
@@ -256,11 +269,15 @@ pub fn match_visited_subsequence(
 }
 
 pub fn catalog_specs(catalog: Catalog) -> Vec<TraversalSpec> {
-    let mut specs = smoke_specs();
-    if catalog == Catalog::Full {
-        specs.extend(full_extra_specs());
+    match catalog {
+        Catalog::Smoke => smoke_specs(),
+        Catalog::Full => {
+            let mut specs = smoke_specs();
+            specs.extend(full_extra_specs());
+            specs
+        }
+        Catalog::Queue => queue_specs(),
     }
-    specs
 }
 
 pub fn run_enumerate(opts: EnumerateOpts) -> Result<()> {
@@ -287,12 +304,18 @@ pub fn run_enumerate(opts: EnumerateOpts) -> Result<()> {
 
 pub fn run_matrix(opts: MatrixOpts) -> Result<()> {
     if opts.mode == MatrixMode::Current && !opts.current_ack {
-        bail!("stores test matrix --mode current requires --i-understand-this-mutates-current-repo");
+        bail!(
+            "stores test matrix --mode current requires --i-understand-this-mutates-current-repo"
+        );
     }
-    let specs = select_matrix_specs(opts.catalog, opts.only.as_deref())?;
     let run_id = matrix_run_id();
     let root = PathBuf::from(".stores").join("test-matrix").join(&run_id);
-    std::fs::create_dir_all(&root)
+    run_matrix_to_root(opts, &run_id, &root)
+}
+
+fn run_matrix_to_root(opts: MatrixOpts, run_id: &str, root: &Path) -> Result<()> {
+    let specs = select_matrix_specs(opts.catalog, opts.only.as_deref())?;
+    std::fs::create_dir_all(root)
         .with_context(|| format!("creating matrix artifact root {}", root.display()))?;
 
     println!(
@@ -432,6 +455,10 @@ fn run_lab_case(
             let case_file = write_er_tooling_case_file(artifact_dir)?;
             run_existing_fake_harness_case(spec, artifact_dir, "T3-er-tooling", Some(case_file), watch)
         }
+        "queue-two-happy" => run_queue_two_happy(spec, artifact_dir, watch),
+        "queue-overlap-needs-review" => run_queue_overlap_needs_review(spec, artifact_dir, watch),
+        "queue-branch-head-changed" => run_queue_branch_head_changed(spec, artifact_dir, watch),
+        "queue-conflict-blocked" => run_queue_conflict_blocked(spec, artifact_dir, watch),
         "matrix-intentional-red" => {
             let case_file = write_intentional_red_case_file(artifact_dir)?;
             run_existing_fake_harness_case(
@@ -452,6 +479,348 @@ fn run_lab_case(
             message: "Lab MVP executes T3-hp-with-substeps, T3-pr1, T3-cr1, T3-er-tooling, and matrix-intentional-red; this row is cataloged for later phases".to_string(),
         }),
     }
+}
+
+struct QueueLab {
+    _tmp: tempfile::TempDir,
+    conn: Connection,
+    repo: PathBuf,
+    agents: AgentsYaml,
+}
+
+impl QueueLab {
+    fn new() -> Result<Self> {
+        let tmp = tempfile::tempdir().context("create queue matrix tempdir")?;
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo)?;
+        git_ok(&repo, &["init", "-b", "main"])?;
+        git_ok(&repo, &["config", "user.email", "fake@example.test"])?;
+        git_ok(&repo, &["config", "user.name", "Fake Test"])?;
+        std::fs::write(repo.join("README.md"), "queue matrix base\n")?;
+        git_ok(&repo, &["add", "README.md"])?;
+        git_ok(&repo, &["commit", "-m", "base"])?;
+        std::fs::write(repo.join("shared.txt"), "base\n")?;
+        git_ok(&repo, &["add", "shared.txt"])?;
+        git_ok(&repo, &["commit", "-m", "shared base"])?;
+
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SUBSTRATE_DDL)?;
+        for name in ["tasks", "external_reviews", "observations", "intake"] {
+            let schema = bundled_schema_for_matrix(name)?;
+            conn.execute_batch(&ddl_for(&schema))?;
+        }
+        crate::handlers::framework_migrate::ensure_integration_singleton_index(&conn)?;
+        let agents = integrate_only_agents_for_matrix("true", false, "origin");
+        Ok(Self {
+            _tmp: tmp,
+            conn,
+            repo,
+            agents,
+        })
+    }
+
+    fn main_sha(&self) -> Result<String> {
+        git_sha_matrix(&self.repo, "main")
+    }
+
+    fn fake_marker_branch(&self, branch: &str, task_id: &str) -> Result<String> {
+        git_ok(&self.repo, &["checkout", "main"])?;
+        git_ok(&self.repo, &["checkout", "-b", branch])?;
+        let out = FakeRunner::with_bin(super::fake_agent_bin()?).spawn_with_invocation_and_env(
+            "executor",
+            "",
+            "",
+            None,
+            Some(self.repo.to_str().unwrap()),
+            None,
+            &[
+                ("STORES_FAKE_DELAY_MS".to_string(), "0".to_string()),
+                (
+                    "STORES_FAKE_EXECUTOR_MODE".to_string(),
+                    "marker_file".to_string(),
+                ),
+                ("STORES_FAKE_TASK_ID".to_string(), task_id.to_string()),
+                ("STORES_FAKE_PHASE".to_string(), "1".to_string()),
+                ("STORES_FAKE_CYCLE".to_string(), "1".to_string()),
+                ("STORES_FAKE_ATTEMPT".to_string(), "1".to_string()),
+            ],
+        )?;
+        if out.exit_code != 0 {
+            bail!("fake executor for {task_id} exited {}", out.exit_code);
+        }
+        let head = self.main_or_branch_sha(branch)?;
+        git_ok(&self.repo, &["checkout", "main"])?;
+        Ok(head)
+    }
+
+    fn branch_file_commit(
+        &self,
+        branch: &str,
+        file: &str,
+        contents: &str,
+        msg: &str,
+    ) -> Result<String> {
+        git_ok(&self.repo, &["checkout", "main"])?;
+        git_ok(&self.repo, &["checkout", "-b", branch])?;
+        std::fs::write(self.repo.join(file), contents)?;
+        git_ok(&self.repo, &["add", file])?;
+        git_ok(&self.repo, &["commit", "-m", msg])?;
+        let head = self.main_or_branch_sha(branch)?;
+        git_ok(&self.repo, &["checkout", "main"])?;
+        Ok(head)
+    }
+
+    fn mutate_branch_file(
+        &self,
+        branch: &str,
+        file: &str,
+        contents: &str,
+        msg: &str,
+    ) -> Result<String> {
+        git_ok(&self.repo, &["checkout", branch])?;
+        std::fs::write(self.repo.join(file), contents)?;
+        git_ok(&self.repo, &["add", file])?;
+        git_ok(&self.repo, &["commit", "-m", msg])?;
+        let head = self.main_or_branch_sha(branch)?;
+        git_ok(&self.repo, &["checkout", "main"])?;
+        Ok(head)
+    }
+
+    fn seed_task(&self, display_id: &str, branch: &str) -> Result<()> {
+        seed_queued_task_matrix(&self.conn, display_id, branch, self.repo.to_str().unwrap())
+    }
+
+    fn insert_passed_er(&self, er_id: &str, task_id: &str, base: &str, head: &str) -> Result<()> {
+        insert_passed_er_matrix(&self.conn, er_id, task_id, 1, base, head)
+    }
+
+    fn drive_until<F>(&self, max_iters: usize, predicate: F) -> Result<usize>
+    where
+        F: FnMut(&Connection) -> bool,
+    {
+        drive_queue_daemon_until(&self.conn, &self.agents, max_iters, predicate)
+    }
+
+    fn status(&self, task_id: &str) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT status FROM tasks WHERE display_id=?1",
+                [task_id],
+                |r| r.get(0),
+            )
+            .with_context(|| format!("read status for {task_id}"))
+    }
+
+    fn attempt_field(&self, task_id: &str, field: &str) -> Result<Option<String>> {
+        let path = format!("$[#-1].{}", field);
+        self.conn.query_row(
+            &format!("SELECT json_extract(integration_attempts, '{}') FROM tasks WHERE display_id=?1", path),
+            [task_id],
+            |r| r.get(0),
+        ).with_context(|| format!("read attempt field {field} for {task_id}"))
+    }
+
+    fn blocked_reason(&self, task_id: &str) -> Result<String> {
+        let v: Option<String> = self.conn.query_row(
+            "SELECT integration_blocked_reason FROM tasks WHERE display_id=?1",
+            [task_id],
+            |r| r.get(0),
+        )?;
+        Ok(v.unwrap_or_default())
+    }
+
+    fn main_or_branch_sha(&self, rev: &str) -> Result<String> {
+        git_sha_matrix(&self.repo, rev)
+    }
+}
+
+fn queue_result_pass(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    observed: impl Into<String>,
+    message: impl Into<String>,
+) -> MatrixCaseResult {
+    MatrixCaseResult {
+        id: spec.id.to_string(),
+        family: spec.family.to_string(),
+        expected: spec.expected.to_string(),
+        observed: observed.into(),
+        verdict: MatrixVerdict::Pass,
+        artifact_dir: artifact_dir.display().to_string(),
+        message: message.into(),
+    }
+}
+
+fn run_queue_two_happy(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let lab = QueueLab::new()?;
+    lab.fake_marker_branch("feat/q1", "Q001")?;
+    lab.fake_marker_branch("feat/q2", "Q002")?;
+    lab.seed_task("Q001", "feat/q1")?;
+    lab.seed_task("Q002", "feat/q2")?;
+    lab.drive_until(30, |conn| {
+        task_status_matrix(conn, "Q001") == "integrated"
+            && task_status_matrix(conn, "Q002") == "integrated"
+    })?;
+    let q1_landed = lab
+        .attempt_field("Q001", "landed_main_sha")?
+        .unwrap_or_default();
+    let q2_base = lab
+        .attempt_field("Q002", "base_main_sha")?
+        .unwrap_or_default();
+    if q1_landed.is_empty() || q2_base != q1_landed {
+        bail!("expected Q002 to integrate against Q001 landed main; q1_landed={q1_landed:?} q2_base={q2_base:?}");
+    }
+    if watch {
+        println!(
+            "queue-two-happy main={} q1_outcome={:?} q2_outcome={:?}",
+            lab.main_sha()?,
+            lab.attempt_field("Q001", "outcome")?,
+            lab.attempt_field("Q002", "outcome")?
+        );
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "Q001,Q002 integrated serially",
+        "real queue lab integrated two fake-marker branches; Q002 base_main_sha equals Q001 landed_main_sha",
+    ))
+}
+
+fn run_queue_overlap_needs_review(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let lab = QueueLab::new()?;
+    lab.fake_marker_branch("feat/qn1", "QN001")?;
+    let base = lab.main_sha()?;
+    let reviewed_head = lab.fake_marker_branch("feat/qn2", "QN002")?;
+    lab.seed_task("QN001", "feat/qn1")?;
+    lab.seed_task("QN002", "feat/qn2")?;
+    lab.insert_passed_er("ER-QN002", "QN002", &base, &reviewed_head)?;
+    lab.drive_until(30, |conn| {
+        task_status_matrix(conn, "QN001") == "integrated"
+            && task_status_matrix(conn, "QN002") == "integration_blocked"
+    })?;
+    let qn1_landed = lab
+        .attempt_field("QN001", "landed_main_sha")?
+        .unwrap_or_default();
+    let qn2_base = lab
+        .attempt_field("QN002", "base_main_sha")?
+        .unwrap_or_default();
+    if qn1_landed.is_empty() || qn2_base != qn1_landed {
+        bail!("expected QN002 to classify at front against QN001 landed main; qn1_landed={qn1_landed:?} qn2_base={qn2_base:?}");
+    }
+    let decision = lab
+        .attempt_field("QN002", "freshness_decision")?
+        .unwrap_or_default();
+    let reason = lab.blocked_reason("QN002")?;
+    if decision != "NeedsReview" || !reason.contains("needs_review") {
+        bail!("expected QN002 NeedsReview, got decision={decision:?} reason={reason:?}");
+    }
+    if watch {
+        println!(
+            "queue-overlap-needs-review qn1={} qn2_decision={} reason={}",
+            lab.status("QN001")?,
+            decision,
+            reason
+        );
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "QN001 integrated; QN002 NeedsReview",
+        "second queued candidate was classified at front after main moved and routed to typed NeedsReview",
+    ))
+}
+
+fn run_queue_branch_head_changed(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let lab = QueueLab::new()?;
+    let base = lab.main_sha()?;
+    let reviewed_head = lab.fake_marker_branch("feat/qbranch", "QB001")?;
+    lab.mutate_branch_file(
+        "feat/qbranch",
+        "branch-extra.txt",
+        "changed after review\n",
+        "branch changed after review",
+    )?;
+    lab.seed_task("QB001", "feat/qbranch")?;
+    lab.insert_passed_er("ER-QB001", "QB001", &base, &reviewed_head)?;
+    lab.drive_until(10, |conn| {
+        task_status_matrix(conn, "QB001") == "integration_blocked"
+    })?;
+    let decision = lab
+        .attempt_field("QB001", "freshness_decision")?
+        .unwrap_or_default();
+    if decision != "NeedsReview" {
+        bail!("expected branch-head changed NeedsReview, got {decision:?}");
+    }
+    if watch {
+        println!(
+            "queue-branch-head-changed decision={} reason={}",
+            decision,
+            lab.blocked_reason("QB001")?
+        );
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "QB001 NeedsReview",
+        "candidate branch changed after ER stamp and was routed to typed NeedsReview",
+    ))
+}
+
+fn run_queue_conflict_blocked(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let lab = QueueLab::new()?;
+    lab.branch_file_commit(
+        "feat/qc1",
+        "shared.txt",
+        "first branch\n",
+        "first conflicting branch",
+    )?;
+    lab.branch_file_commit(
+        "feat/qc2",
+        "shared.txt",
+        "second branch\n",
+        "second conflicting branch",
+    )?;
+    lab.seed_task("QC001", "feat/qc1")?;
+    lab.seed_task("QC002", "feat/qc2")?;
+    lab.drive_until(30, |conn| {
+        task_status_matrix(conn, "QC001") == "integrated"
+            && task_status_matrix(conn, "QC002") == "integration_blocked"
+    })?;
+    let outcome = lab.attempt_field("QC002", "outcome")?.unwrap_or_default();
+    let reason = lab.blocked_reason("QC002")?;
+    if !matches!(outcome.as_str(), "rebase_conflict" | "merge_failure")
+        && !reason.contains("conflict")
+    {
+        bail!("expected conflict blocked outcome, got outcome={outcome:?} reason={reason:?}");
+    }
+    if watch {
+        println!(
+            "queue-conflict-blocked outcome={} reason={}",
+            outcome, reason
+        );
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "QC001 integrated; QC002 conflict blocked",
+        "second queued candidate hit a real git conflict at front of queue and was integration_blocked",
+    ))
 }
 
 fn run_current_case(
@@ -501,17 +870,21 @@ fn run_current_fake_harness_case(
             observed: spec.expected.to_string(),
             verdict: MatrixVerdict::Pass,
             artifact_dir: artifact_dir_display,
-            message: "current-mode row ran through real current repo daemon path with fake runners only".to_string(),
+            message:
+                "current-mode row ran through real current repo daemon path with fake runners only"
+                    .to_string(),
         }),
-        Err(err) if is_expectation_mismatch(&err) || is_current_red_proof(&err) => Ok(MatrixCaseResult {
-            id: spec.id.to_string(),
-            family: spec.family.to_string(),
-            expected: spec.expected.to_string(),
-            observed: err.to_string(),
-            verdict: MatrixVerdict::Fail,
-            artifact_dir: artifact_dir_display,
-            message: format!("RED current-mode substrate mismatch: {err}"),
-        }),
+        Err(err) if is_expectation_mismatch(&err) || is_current_red_proof(&err) => {
+            Ok(MatrixCaseResult {
+                id: spec.id.to_string(),
+                family: spec.family.to_string(),
+                expected: spec.expected.to_string(),
+                observed: err.to_string(),
+                verdict: MatrixVerdict::Fail,
+                artifact_dir: artifact_dir_display,
+                message: format!("RED current-mode substrate mismatch: {err}"),
+            })
+        }
         Err(err) => Err(err),
     }
 }
@@ -627,7 +1000,12 @@ fn write_plan_review_reject_once_case_file(artifact_dir: &Path) -> Result<PathBu
       no_real_llm: true
 "#,
     )
-    .with_context(|| format!("writing plan-review reject once case file {}", path.display()))?;
+    .with_context(|| {
+        format!(
+            "writing plan-review reject once case file {}",
+            path.display()
+        )
+    })?;
     Ok(path)
 }
 
@@ -656,7 +1034,12 @@ fn write_code_review_revise_once_case_file(artifact_dir: &Path) -> Result<PathBu
       no_real_llm: true
 "#,
     )
-    .with_context(|| format!("writing code-review revise once case file {}", path.display()))?;
+    .with_context(|| {
+        format!(
+            "writing code-review revise once case file {}",
+            path.display()
+        )
+    })?;
     Ok(path)
 }
 
@@ -712,6 +1095,176 @@ fn write_intentional_red_case_file(artifact_dir: &Path) -> Result<PathBuf> {
     )
     .with_context(|| format!("writing intentional RED case file {}", path.display()))?;
     Ok(path)
+}
+
+fn bundled_schema_for_matrix(name: &str) -> Result<Schema> {
+    let yaml = crate::cli::dynamic::BUNDLED_STORE_SCHEMAS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, y)| *y)
+        .with_context(|| format!("bundled schema {name}"))?;
+    Schema::from_yaml(yaml)
+}
+
+fn git_out_matrix(repo: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .with_context(|| format!("run git {} in {}", args.join(" "), repo.display()))
+}
+
+fn git_ok(repo: &Path, args: &[&str]) -> Result<()> {
+    let out = git_out_matrix(repo, args)?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed in {}: {}",
+            args.join(" "),
+            repo.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn git_sha_matrix(repo: &Path, rev: &str) -> Result<String> {
+    let out = git_out_matrix(repo, &["rev-parse", rev])?;
+    if !out.status.success() {
+        bail!(
+            "git rev-parse {rev} failed in {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+fn seed_queued_task_matrix(
+    conn: &Connection,
+    display_id: &str,
+    branch: &str,
+    workspace_path: &str,
+) -> Result<()> {
+    let now = "2026-05-18T00:00:00Z";
+    let contract =
+        r#"{"done_when":"queue matrix","scope_in":"fake queue matrix","scope_out":"production"}"#;
+    conn.execute(
+        "INSERT INTO tasks (display_id, status, title, slug, branch, workspace_path, contract, activation, blocked_reason, created_at, updated_at, created_by, updated_by) \
+         VALUES (?1, 'integration_queued', 'stores test queue', 'stores-test-queue', ?2, ?3, ?4, 'active', '', ?5, ?5, 'stores-test', 'stores-test')",
+        params![display_id, branch, workspace_path, contract, now],
+    )?;
+    let row_id: i64 = conn.query_row(
+        "SELECT id FROM tasks WHERE display_id=?1",
+        [display_id],
+        |r| r.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO transition_history (store,row_id,display_id,from_status,to_status,verb,invoker,occurred_at) \
+         VALUES ('tasks', ?1, ?2, 'accepted', 'integration_queued', 'enqueue-integration', 'framework', ?3)",
+        params![row_id, display_id, now],
+    )?;
+    Ok(())
+}
+
+fn insert_passed_er_matrix(
+    conn: &Connection,
+    er_id: &str,
+    task_id: &str,
+    attempt: i64,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<()> {
+    let now = "2026-05-18T00:00:00Z";
+    conn.execute(
+        "INSERT INTO external_reviews (display_id,status,task_id,attempt,adapter,base_sha,head_sha,verdict,created_at,updated_at,created_by,updated_by,runner) \
+         VALUES (?1, 'passed', ?2, ?3, 'external_review', ?4, ?5, 'PASS', ?6, ?6, 'stores-test', 'stores-test', 'fake')",
+        params![er_id, task_id, attempt, base_sha, head_sha, now],
+    )?;
+    Ok(())
+}
+
+fn integrate_only_agents_for_matrix(
+    pre_land_check: &str,
+    allow_push: bool,
+    push_remote: &str,
+) -> AgentsYaml {
+    let mut args = serde_yaml::Mapping::new();
+    args.insert(
+        serde_yaml::Value::String("pre_land_check".into()),
+        serde_yaml::Value::String(pre_land_check.into()),
+    );
+    args.insert(
+        serde_yaml::Value::String("allow_push".into()),
+        serde_yaml::Value::Bool(allow_push),
+    );
+    args.insert(
+        serde_yaml::Value::String("push_remote".into()),
+        serde_yaml::Value::String(push_remote.into()),
+    );
+    AgentsYaml {
+        agents: vec![AgentEntry {
+            name: "integrate".to_string(),
+            subscribes_to: vec![Subscription {
+                store: "tasks".to_string(),
+                transition: TransitionEdge {
+                    from: "accepted".to_string(),
+                    to: "integration_queued".to_string(),
+                },
+                integration_step: None,
+                predicate: None,
+            }],
+            command: "builtin:integrate".to_string(),
+            claim_window_secs: 300,
+            retry_policy: RetryPolicy::default(),
+            command_args: Some(args),
+        }],
+        deployment_specialist: None,
+    }
+}
+
+fn empty_policies_for_matrix() -> PoliciesYaml {
+    PoliciesYaml {
+        hash: String::new(),
+        policies: vec![],
+    }
+}
+
+fn drive_queue_daemon_until<F>(
+    conn: &Connection,
+    agents: &AgentsYaml,
+    max_iters: usize,
+    mut predicate: F,
+) -> Result<usize>
+where
+    F: FnMut(&Connection) -> bool,
+{
+    let policies = empty_policies_for_matrix();
+    let cfg = PathBuf::from("/tmp/stores-test-matrix-queue-config.yaml");
+    for i in 0..max_iters {
+        poll_once_with_guard::<FsBinaryIdentityProvider>(
+            conn,
+            agents,
+            &policies,
+            &cfg,
+            "matrix-queue",
+            "matrix-epoch",
+            None,
+        )?;
+        if predicate(conn) {
+            return Ok(i + 1);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    bail!("queue matrix predicate not satisfied within {max_iters} poll iterations")
+}
+
+fn task_status_matrix(conn: &Connection, display_id: &str) -> String {
+    conn.query_row(
+        "SELECT status FROM tasks WHERE display_id=?1",
+        [display_id],
+        |r| r.get(0),
+    )
+    .unwrap_or_else(|_| "<missing>".to_string())
 }
 
 fn write_case_artifacts(artifact_dir: &Path, result: &MatrixCaseResult) -> Result<()> {
@@ -807,6 +1360,69 @@ fn intentional_red_spec() -> TraversalSpec {
             authority_events: vec!["task:accept"],
         },
     }
+}
+
+fn queue_specs() -> Vec<TraversalSpec> {
+    vec![
+        TraversalSpec {
+            id: "queue-two-happy",
+            family: "queue",
+            description: "two queued candidates land serially through capacity-1 integration",
+            expected: "both-integrated",
+            coverage: CoverageTags {
+                schema_edges: vec![
+                    "tasks:integration_queued:start-integration:integrating",
+                    "tasks:integrating:mark_deploy_done:integrated",
+                ],
+                runner_outcomes: vec!["executor:marker_commit"],
+                perturbations: vec!["queue:two_candidates"],
+                authority_events: vec!["policy:integration_queue"],
+            },
+        },
+        TraversalSpec {
+            id: "queue-overlap-needs-review",
+            family: "queue",
+            description:
+                "queued candidate reviewed before main movement gets typed NeedsReview at front",
+            expected: "needs-review",
+            coverage: CoverageTags {
+                schema_edges: vec![
+                    "tasks:integrating:mark_integration_blocked:integration_blocked",
+                ],
+                runner_outcomes: vec!["executor:marker_commit"],
+                perturbations: vec!["queue:main_moves_before_second_candidate"],
+                authority_events: vec!["policy:integration_queue"],
+            },
+        },
+        TraversalSpec {
+            id: "queue-branch-head-changed",
+            family: "queue",
+            description: "candidate branch mutates after review and is routed to NeedsReview",
+            expected: "needs-review",
+            coverage: CoverageTags {
+                schema_edges: vec![
+                    "tasks:integrating:mark_integration_blocked:integration_blocked",
+                ],
+                runner_outcomes: vec!["executor:marker_commit"],
+                perturbations: vec!["git:branch_head_changed_after_review"],
+                authority_events: vec!["policy:integration_queue"],
+            },
+        },
+        TraversalSpec {
+            id: "queue-conflict-blocked",
+            family: "queue",
+            description: "front-of-queue refresh conflict routes to typed integration_blocked",
+            expected: "integration-blocked/conflict",
+            coverage: CoverageTags {
+                schema_edges: vec![
+                    "tasks:integrating:mark_integration_blocked:integration_blocked",
+                ],
+                runner_outcomes: vec!["executor:marker_commit"],
+                perturbations: vec!["git:front_of_queue_rebase_conflict"],
+                authority_events: vec!["policy:integration_queue"],
+            },
+        },
+    ]
 }
 
 fn smoke_specs() -> Vec<TraversalSpec> {
@@ -1139,17 +1755,17 @@ mod tests {
             pr_case.stages["plan_reviewer"].attempts[0].outcome,
             "NEEDS_WORK"
         );
-        assert_eq!(
-            pr_case.stages["plan_reviewer"].attempts[1].outcome,
-            "READY"
-        );
+        assert_eq!(pr_case.stages["plan_reviewer"].attempts[1].outcome, "READY");
         assert_eq!(pr_case.expect.task_status, "integrated");
 
         let cr = write_code_review_revise_once_case_file(dir.path()).unwrap();
         let cr_manifest: crate::cli::test::TestManifest =
             serde_yaml::from_str(&std::fs::read_to_string(cr).unwrap()).unwrap();
         let cr_case = &cr_manifest.cases["T3-cr1"];
-        assert_eq!(cr_case.stages["code_reviewer"].attempts[0].outcome, "REVISE");
+        assert_eq!(
+            cr_case.stages["code_reviewer"].attempts[0].outcome,
+            "REVISE"
+        );
         assert_eq!(cr_case.stages["code_reviewer"].attempts[1].outcome, "PASS");
         assert_eq!(cr_case.expect.task_status, "integrated");
 
@@ -1176,5 +1792,84 @@ mod tests {
         assert!(ids.contains(&"T3-er-revise-from-blocked-runner"));
         assert!(ids.contains(&"T3-hp-delegated-policy"));
         assert!(ids.contains(&"T2-multi-phase-rejected"));
+    }
+
+    #[test]
+    fn queue_catalog_lists_batch_b_cases() {
+        assert_eq!(Catalog::parse("queue").unwrap(), Catalog::Queue);
+        assert_eq!(Catalog::Queue.as_str(), "queue");
+
+        let ids: Vec<_> = catalog_specs(Catalog::Queue)
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "queue-two-happy",
+                "queue-overlap-needs-review",
+                "queue-branch-head-changed",
+                "queue-conflict-blocked",
+            ]
+        );
+    }
+
+    #[test]
+    fn queue_matrix_lab_output_writes_queue_report() {
+        let _env_guard = crate::runner::test_support::ENV_LOCK
+            .lock()
+            .expect("runner env lock poisoned");
+        let old_fake_bin = std::env::var_os("STORES_FAKE_AGENT_BIN");
+        std::env::set_var(
+            "STORES_FAKE_AGENT_BIN",
+            target_debug_bin("stores-fake-agent"),
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("matrix-output");
+        let result = run_matrix_to_root(
+            MatrixOpts {
+                catalog: Catalog::Queue,
+                mode: MatrixMode::Lab,
+                only: Some("queue-two-happy".to_string()),
+                watch: false,
+                current_ack: false,
+            },
+            "unit-queue-run",
+            &root,
+        );
+        match old_fake_bin {
+            Some(value) => std::env::set_var("STORES_FAKE_AGENT_BIN", value),
+            None => std::env::remove_var("STORES_FAKE_AGENT_BIN"),
+        }
+        result.unwrap();
+
+        let index: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("index.json")).unwrap())
+                .unwrap();
+        assert_eq!(index["mode"], "lab");
+        assert_eq!(index["catalog"], "queue");
+        assert_eq!(index["results"][0]["id"], "queue-two-happy");
+        assert_eq!(index["results"][0]["verdict"], "PASS");
+
+        let report = std::fs::read_to_string(root.join("index.md")).unwrap();
+        assert!(report.contains("catalog: `queue`"));
+        assert!(report.contains("`queue-two-happy`"));
+        assert!(root.join("queue-two-happy").join("proof.txt").exists());
+    }
+
+    fn target_debug_bin(name: &str) -> PathBuf {
+        let mut path = std::env::current_exe().expect("unit test current_exe");
+        path.pop();
+        if path.file_name().and_then(|n| n.to_str()) == Some("deps") {
+            path.pop();
+        }
+        path.push(name);
+        assert!(
+            path.exists(),
+            "expected built {name} binary at {}; run `cargo test --bins --tests` or `cargo build --bin stores --bin stores-fake-agent` before this test",
+            path.display()
+        );
+        path
     }
 }

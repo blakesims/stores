@@ -267,7 +267,7 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .arg(
                             Arg::new("catalog")
                                 .long("catalog")
-                                .value_parser(["smoke", "full"])
+                                .value_parser(["smoke", "full", "queue"])
                                 .default_value("smoke"),
                         )
                         .arg(
@@ -290,7 +290,7 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                         .arg(
                             Arg::new("catalog")
                                 .long("catalog")
-                                .value_parser(["smoke", "full"])
+                                .value_parser(["smoke", "full", "queue"])
                                 .default_value("smoke"),
                         )
                         .arg(
