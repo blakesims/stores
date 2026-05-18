@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::codegen::ddl::{ddl_for, SUBSTRATE_DDL};
 use crate::flow::agents_yaml::{Subscription, TransitionEdge};
 use crate::flow::policies_yaml::PoliciesYaml;
+use crate::flow::engine_runner::{scan_and_record_actionability, ScannerSchemas};
 use crate::flow::{AgentEntry, AgentsYaml, RetryPolicy};
 use crate::handlers::agents_run::{poll_once_with_guard, FsBinaryIdentityProvider};
 use crate::runner::{FakeRunner, Runner};
@@ -619,6 +620,8 @@ fn run_lab_case(
             "runner nonzero exit was classified as a blocked task",
         ),
         "no-heartbeat" => run_no_heartbeat_case(spec, artifact_dir, watch),
+        "duplicate-drive-refusal" => run_duplicate_drive_refusal(spec, artifact_dir, watch),
+        "stale-dead-current-run-marker" => run_stale_dead_current_run_marker(spec, artifact_dir, watch),
         "matrix-intentional-red" => {
             let case_file = write_intentional_red_case_file(artifact_dir)?;
             run_existing_fake_harness_case(
@@ -649,6 +652,125 @@ struct QueueLab {
     conn: Connection,
     repo: PathBuf,
     agents: AgentsYaml,
+}
+
+struct DriveLab {
+    _tmp: tempfile::TempDir,
+    conn: Connection,
+    workspace: PathBuf,
+    tasks_schema: Schema,
+    intake_schema: Schema,
+    observations_schema: Schema,
+}
+
+impl DriveLab {
+    fn new() -> Result<Self> {
+        let tmp = tempfile::tempdir().context("create drive matrix tempdir")?;
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".stores").join("runs"))?;
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(SUBSTRATE_DDL)?;
+        let tasks_schema = bundled_schema_for_matrix("tasks")?;
+        let intake_schema = bundled_schema_for_matrix("intake")?;
+        let observations_schema = bundled_schema_for_matrix("observations")?;
+        conn.execute_batch(&ddl_for(&tasks_schema))?;
+        conn.execute_batch(&ddl_for(&intake_schema))?;
+        conn.execute_batch(&ddl_for(&observations_schema))?;
+        Ok(Self {
+            _tmp: tmp,
+            conn,
+            workspace,
+            tasks_schema,
+            intake_schema,
+            observations_schema,
+        })
+    }
+
+    fn seed_active_task(&self, display_id: &str, status: &str) -> Result<()> {
+        let now = "2026-05-18T00:00:00Z";
+        let contract = r#"{"done_when":"drive battlescar matrix","scope_in":"fake drive matrix","scope_out":"production"}"#;
+        let plan = r#"{"phases":[{"title":"matrix phase","steps":["fake"]}]}"#;
+        self.conn.execute(
+            "INSERT INTO tasks (display_id, status, title, slug, workspace_path, contract, plan, tier_hint, activation, lifecycle, active_step, integration_step, blocked, blocked_reason, created_at, updated_at, created_by, updated_by) \
+             VALUES (?1, ?2, 'stores test drive battlescar', 'stores-test-drive-battlescar', ?3, ?4, ?5, 'T3', 'active', 'active', ?2, 'none', 0, '', ?6, ?6, 'stores-test', 'stores-test')",
+            params![display_id, status, self.workspace.to_str().unwrap(), contract, plan, now],
+        )?;
+        Ok(())
+    }
+
+    fn row_id(&self, display_id: &str) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT id FROM tasks WHERE display_id=?1",
+                [display_id],
+                |r| r.get(0),
+            )
+            .with_context(|| format!("read row_id for {display_id}"))
+    }
+
+    fn insert_live_auto_drive_lock(&self, row_id: i64, display_id: &str) -> Result<()> {
+        let now = crate::handlers::row::now_iso8601();
+        self.conn.execute(
+            "INSERT INTO dispatch_locks (store, row_id, display_id, agent_name, transition_id, claimed_at, heartbeat_at, claimed_by, pid) \
+             VALUES ('tasks', ?1, ?2, 'auto-drive', 1, ?3, ?3, 'matrix-live-owner', 0)",
+            params![row_id, display_id, now],
+        )?;
+        Ok(())
+    }
+
+    fn auto_drive_lock_count(&self, row_id: i64) -> Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM dispatch_locks WHERE store='tasks' AND row_id=?1 AND agent_name='auto-drive' AND finished_at IS NULL",
+            params![row_id],
+            |r| r.get(0),
+        ).context("count active auto-drive locks")
+    }
+
+    fn scan_actionability(&self) -> Result<crate::flow::engine_runner::ScannerResult> {
+        scan_and_record_actionability(
+            &self.conn,
+            ScannerSchemas {
+                tasks: &self.tasks_schema,
+                intake: &self.intake_schema,
+                observations: &self.observations_schema,
+            },
+            1,
+            &crate::handlers::row::now_iso8601(),
+        )
+    }
+
+    fn actionability(&self, row_id: i64) -> Result<(String, Option<String>, bool)> {
+        self.conn.query_row(
+            "SELECT classification, held_reason, dispatched FROM engine_runner_actions WHERE store='tasks' AND row_id=?1",
+            params![row_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
+        ).with_context(|| format!("read engine_runner_actions for row_id={row_id}"))
+    }
+
+    fn marker_path(&self, display_id: &str) -> Result<PathBuf> {
+        Ok(self
+            .workspace
+            .join(".stores")
+            .join("runs")
+            .join(format!("current-{display_id}-matrix.json")))
+    }
+
+    fn write_current_run_marker(&self, display_id: &str, status: &str, updated_at: &str) -> Result<()> {
+        let path = self.marker_path(display_id)?;
+        let body = serde_json::json!({
+            "display_id": display_id,
+            "phase": 0,
+            "cycle": 0,
+            "role": "planner",
+            "runner": "fake",
+            "session_id": "matrix-session",
+            "status": status,
+            "updated_at": updated_at,
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&body)?)
+            .with_context(|| format!("write current-run marker {}", path.display()))?;
+        Ok(())
+    }
 }
 
 impl QueueLab {
@@ -991,20 +1113,147 @@ fn run_stale_external_review_head_mutation(
     artifact_dir: &Path,
     watch: bool,
 ) -> Result<MatrixCaseResult> {
-    match run_queue_branch_head_changed(spec, artifact_dir, watch) {
-        Ok(result) => Ok(result),
-        Err(err) => Ok(MatrixCaseResult {
-            id: spec.id.to_string(),
-            family: spec.family.to_string(),
-            expected: spec.expected.to_string(),
-            observed: format!("{err:#}"),
-            verdict: MatrixVerdict::Fail,
-            artifact_dir: artifact_dir.display().to_string(),
-            message:
-                "RED: stale external-review head mutation did not reach typed NeedsReview cleanly"
-                    .to_string(),
-        }),
+    let lab = QueueLab::new()?;
+    let base = lab.main_sha()?;
+    let reviewed_head = lab.fake_marker_branch("feat/stale-er-head", "BSER001")?;
+    lab.mutate_branch_file(
+        "feat/stale-er-head",
+        "branch-extra.txt",
+        "changed after external review\n",
+        "branch changed after external review",
+    )?;
+    lab.seed_task("BSER001", "feat/stale-er-head")?;
+    lab.insert_passed_er("ER-BSER001", "BSER001", &base, &reviewed_head)?;
+    lab.drive_until(10, |conn| task_status_matrix(conn, "BSER001") == "integration_blocked")?;
+
+    let outcome = lab
+        .attempt_field("BSER001", "outcome")?
+        .unwrap_or_default();
+    let decision = lab
+        .attempt_field("BSER001", "freshness_decision")?
+        .unwrap_or_default();
+    let completed_at = lab
+        .attempt_field("BSER001", "completed_at")?
+        .unwrap_or_default();
+    let reason = lab.blocked_reason("BSER001")?;
+    let unfinished_locks: i64 = lab.conn.query_row(
+        "SELECT COUNT(*) FROM dispatch_locks WHERE store='tasks' AND display_id='BSER001' AND agent_name='integrate' AND finished_at IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    if outcome != "needs_review"
+        || decision != "NeedsReview"
+        || completed_at.is_empty()
+        || !reason.contains("needs_review")
+        || unfinished_locks != 0
+    {
+        bail!(
+            "expected typed NeedsReview with finalized integrate lock; outcome={outcome:?} decision={decision:?} completed_at={completed_at:?} reason={reason:?} unfinished_locks={unfinished_locks}"
+        );
     }
+    if watch {
+        println!(
+            "stale-external-review-head-mutation outcome={} decision={} reason={} unfinished_integrate_locks={}",
+            outcome, decision, reason, unfinished_locks
+        );
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "BSER001 NeedsReview with finalized integrate lock",
+        "candidate head mutated after external review and was routed to typed NeedsReview with no unfinished integrate lock",
+    ))
+}
+
+fn run_duplicate_drive_refusal(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let lab = DriveLab::new()?;
+    lab.seed_active_task("BDD001", "planning")?;
+    let row_id = lab.row_id("BDD001")?;
+    lab.insert_live_auto_drive_lock(row_id, "BDD001")?;
+    let before_locks = lab.auto_drive_lock_count(row_id)?;
+    let result = lab.scan_actionability()?;
+    let (classification, held_reason, dispatched) = lab.actionability(row_id)?;
+    let after_locks = lab.auto_drive_lock_count(row_id)?;
+    if result.rows.len() != 1
+        || classification != "held"
+        || held_reason.as_deref() != Some("live_dispatch_lock")
+        || dispatched
+        || before_locks != 1
+        || after_locks != 1
+    {
+        bail!(
+            "expected duplicate drive refusal via live_dispatch_lock without second dispatch; rows={} classification={classification:?} held_reason={held_reason:?} dispatched={dispatched} locks_before={before_locks} locks_after={after_locks}",
+            result.rows.len()
+        );
+    }
+    if watch {
+        println!(
+            "duplicate-drive-refusal classification={} held_reason={:?} dispatched={} locks_before={} locks_after={}",
+            classification, held_reason, dispatched, before_locks, after_locks
+        );
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "BDD001 held/live_dispatch_lock; no second dispatch",
+        "engine scanner recorded duplicate-drive refusal as live_dispatch_lock and did not create a second active drive/dispatch",
+    ))
+}
+
+fn run_stale_dead_current_run_marker(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let lab = DriveLab::new()?;
+    lab.seed_active_task("BSM-STALE", "planning")?;
+    lab.seed_active_task("BSM-LIVE", "planning")?;
+    let stale_id = lab.row_id("BSM-STALE")?;
+    let live_id = lab.row_id("BSM-LIVE")?;
+    lab.write_current_run_marker("BSM-STALE", "running", "2020-01-01T00:00:00Z")?;
+    let fresh_now = crate::handlers::row::now_iso8601();
+    lab.write_current_run_marker("BSM-LIVE", "running", &fresh_now)?;
+    let stale_marker = lab.marker_path("BSM-STALE")?;
+    let live_marker = lab.marker_path("BSM-LIVE")?;
+    let result = lab.scan_actionability()?;
+    let (stale_classification, stale_reason, stale_dispatched) = lab.actionability(stale_id)?;
+    let (live_classification, live_reason, live_dispatched) = lab.actionability(live_id)?;
+    if result.rows.len() != 2
+        || live_classification != "held"
+        || live_reason.as_deref() != Some("live_runner_marker")
+        || live_dispatched
+        || stale_reason.as_deref() == Some("live_runner_marker")
+        || !stale_marker.exists()
+        || !live_marker.exists()
+    {
+        bail!(
+            "expected fresh marker held and stale marker ignored without deletion; rows={} stale=({stale_classification:?},{stale_reason:?},dispatched={stale_dispatched}) live=({live_classification:?},{live_reason:?},dispatched={live_dispatched}) stale_exists={} live_exists={}",
+            result.rows.len(),
+            stale_marker.exists(),
+            live_marker.exists()
+        );
+    }
+    if watch {
+        println!(
+            "stale-dead-current-run-marker stale_reason={:?} stale_dispatched={} live_reason={:?} live_dispatched={} markers_preserved={}/{}",
+            stale_reason,
+            stale_dispatched,
+            live_reason,
+            live_dispatched,
+            stale_marker.exists(),
+            live_marker.exists()
+        );
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "fresh marker held; stale marker ignored; markers preserved",
+        "current-run marker truth distinguished fresh running marker from stale marker without blindly deleting state",
+    ))
 }
 
 fn run_upstream_skip_case(spec: &TraversalSpec, artifact_dir: &Path) -> Result<MatrixCaseResult> {
@@ -1966,9 +2215,9 @@ fn battlescar_specs() -> Vec<TraversalSpec> {
             id: "duplicate-drive-refusal",
             family: "drive-liveness",
             description: "duplicate drive owner is refused instead of starting a second drive",
-            expected: "skip/manual-drive-cli-not-in-matrix-yet",
+            expected: "held/live_dispatch_lock",
             coverage: CoverageTags {
-                schema_edges: vec![],
+                schema_edges: vec!["engine_runner:tasks:held:live_dispatch_lock"],
                 runner_outcomes: vec![],
                 perturbations: vec!["drive:duplicate_owner"],
                 authority_events: vec![],
@@ -1978,9 +2227,9 @@ fn battlescar_specs() -> Vec<TraversalSpec> {
             id: "stale-dead-current-run-marker",
             family: "drive-liveness",
             description: "stale/dead current-run marker truth is classified without wedging",
-            expected: "skip/current-run-marker-lab-not-wired-yet",
+            expected: "held/live_runner_marker",
             coverage: CoverageTags {
-                schema_edges: vec![],
+                schema_edges: vec!["engine_runner:tasks:held:live_runner_marker"],
                 runner_outcomes: vec![],
                 perturbations: vec!["drive:stale_dead_marker"],
                 authority_events: vec![],

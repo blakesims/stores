@@ -157,7 +157,7 @@ fields:
   - {name: blocked_reason, type: text}
   - {name: abandoned_reason, type: text, required: false, actor: framework}
   - {name: abandoned_at, type: timestamp, required: false, actor: framework}
-  - {name: integration_blocked_reason, type: text, required: false, actor: framework, description: "Typed failure mode recorded when the integration lane routes to integration_blocked: rebase_conflict | stale_base | stale_external_review | pre_land_check_failed | merge_failure | push_failure."}
+  - {name: integration_blocked_reason, type: text, required: false, actor: framework, description: "Typed failure mode recorded when the integration lane routes to integration_blocked: rebase_conflict | stale_base | stale_external_review | needs_review | pre_land_check_failed | merge_failure | push_failure."}
   - name: integration_attempts
     type: list_record
     actor: framework
@@ -171,7 +171,7 @@ fields:
       - {name: refresh_strategy, type: text}
       - {name: pre_land_check_summary, type: text}
       - {name: reviewed_base_sha, type: text, description: "base_sha of the passed external_review checked for stale_base; null if no ER, or for stale_external_review path where head — not base — is the divergence."}
-      - {name: outcome, type: enum, enum_values: [integrated, rebase_conflict, stale_base, stale_external_review, pre_land_check_failed, merge_failure, push_failure]}
+      - {name: outcome, type: enum, enum_values: [integrated, needs_review, rebase_conflict, stale_base, stale_external_review, pre_land_check_failed, merge_failure, push_failure]}
       - {name: started_at, type: timestamp}
       - {name: completed_at, type: timestamp}
   - {name: review_base_sha, type: text, required: false, actor: framework}

@@ -3017,7 +3017,7 @@ fn run_dispatch(
             Some(Ok(code)) => return Ok(code),
             Some(Err(e)) => {
                 eprintln!(
-                    "[daemon] builtin '{}' for {}/{} ({}->{}) failed: {}",
+                    "[daemon] builtin '{}' for {}/{} ({}->{}) failed: {:#}",
                     agent.command, store, display_id, from, to, e
                 );
                 return Ok(-1);
