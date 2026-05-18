@@ -305,10 +305,34 @@ pub fn build_root(manifest: &Manifest, schemas: &HashMap<String, Schema>) -> Com
                                 .help("Print underlying harness progress while executable rows run"),
                         )
                         .arg(
+                            Arg::new("report")
+                                .long("report")
+                                .value_parser(["md", "json"])
+                                .default_value("md")
+                                .help("Select the primary report artifact printed at the end"),
+                        )
+                        .arg(
+                            Arg::new("ci")
+                                .long("ci")
+                                .action(ArgAction::SetTrue)
+                                .help("Exit nonzero when any matrix row is FAIL or ERROR"),
+                        )
+                        .arg(
                             Arg::new("i-understand-this-mutates-current-repo")
                                 .long("i-understand-this-mutates-current-repo")
                                 .action(ArgAction::SetTrue)
                                 .help("Required with --mode current; current mode creates real rows/commits in this checkout"),
+                        )
+                        .subcommand(
+                            Command::new("prune")
+                                .about("Remove old .stores/test-matrix run artifacts")
+                                .arg(
+                                    Arg::new("keep-last")
+                                        .long("keep-last")
+                                        .required(true)
+                                        .value_parser(clap::value_parser!(usize))
+                                        .help("Keep the N most recently modified matrix runs"),
+                                ),
                         ),
                 ),
         )

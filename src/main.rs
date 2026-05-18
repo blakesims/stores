@@ -223,25 +223,38 @@ fn main() -> Result<()> {
                 })?;
             }
             Some(("matrix", msub)) => {
-                let catalog = cli::test::matrix::Catalog::parse(
-                    msub.get_one::<String>("catalog")
-                        .map(String::as_str)
-                        .unwrap_or("smoke"),
-                )?;
-                let mode = cli::test::matrix::MatrixMode::parse(
-                    msub.get_one::<String>("mode")
-                        .map(String::as_str)
-                        .unwrap_or("lab"),
-                )?;
-                cli::test::matrix::run_matrix(cli::test::matrix::MatrixOpts {
-                    catalog,
-                    mode,
-                    only: msub.get_one::<String>("only").cloned(),
-                    watch: *msub.get_one::<bool>("watch").unwrap_or(&false),
-                    current_ack: *msub
-                        .get_one::<bool>("i-understand-this-mutates-current-repo")
-                        .unwrap_or(&false),
-                })?;
+                if let Some(("prune", psub)) = msub.subcommand() {
+                    cli::test::matrix::prune_matrix_runs(
+                        *psub.get_one::<usize>("keep-last").unwrap_or(&0),
+                    )?;
+                } else {
+                    let catalog = cli::test::matrix::Catalog::parse(
+                        msub.get_one::<String>("catalog")
+                            .map(String::as_str)
+                            .unwrap_or("smoke"),
+                    )?;
+                    let mode = cli::test::matrix::MatrixMode::parse(
+                        msub.get_one::<String>("mode")
+                            .map(String::as_str)
+                            .unwrap_or("lab"),
+                    )?;
+                    let report = cli::test::matrix::MatrixReport::parse(
+                        msub.get_one::<String>("report")
+                            .map(String::as_str)
+                            .unwrap_or("md"),
+                    )?;
+                    cli::test::matrix::run_matrix(cli::test::matrix::MatrixOpts {
+                        catalog,
+                        mode,
+                        only: msub.get_one::<String>("only").cloned(),
+                        watch: *msub.get_one::<bool>("watch").unwrap_or(&false),
+                        current_ack: *msub
+                            .get_one::<bool>("i-understand-this-mutates-current-repo")
+                            .unwrap_or(&false),
+                        report,
+                        ci: *msub.get_one::<bool>("ci").unwrap_or(&false),
+                    })?;
+                }
             }
             _ => {
                 let mut cmd2 = cli::dynamic::build_root(&manifest, &schemas);

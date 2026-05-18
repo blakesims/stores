@@ -3,6 +3,7 @@
 use anyhow::{bail, Context, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -85,6 +86,39 @@ pub struct MatrixOpts {
     pub only: Option<String>,
     pub watch: bool,
     pub current_ack: bool,
+    pub report: MatrixReport,
+    pub ci: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatrixReport {
+    Md,
+    Json,
+}
+
+impl MatrixReport {
+    pub fn parse(raw: &str) -> Result<Self> {
+        match raw {
+            "md" => Ok(Self::Md),
+            "json" => Ok(Self::Json),
+            other => bail!("unsupported stores test matrix report '{other}' (expected md|json)"),
+        }
+    }
+
+    fn artifact_name(self) -> &'static str {
+        match self {
+            Self::Md => "index.md",
+            Self::Json => "index.json",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MatrixCoverageSummary {
+    pub schema_edges: Vec<String>,
+    pub runner_outcomes: Vec<String>,
+    pub perturbations: Vec<String>,
+    pub authority_events: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -325,6 +359,7 @@ pub fn run_matrix(opts: MatrixOpts) -> Result<()> {
 
 fn run_matrix_to_root(opts: MatrixOpts, run_id: &str, root: &Path) -> Result<()> {
     let specs = select_matrix_specs(opts.catalog, opts.only.as_deref())?;
+    let coverage = coverage_summary(&specs);
     std::fs::create_dir_all(root)
         .with_context(|| format!("creating matrix artifact root {}", root.display()))?;
 
@@ -374,7 +409,7 @@ fn run_matrix_to_root(opts: MatrixOpts, run_id: &str, root: &Path) -> Result<()>
         results.push(case_result);
     }
 
-    write_index_artifact(&root, &run_id, opts.mode, opts.catalog, &results)?;
+    write_index_artifact(&root, &run_id, opts.mode, opts.catalog, &coverage, &results)?;
     let pass = results
         .iter()
         .filter(|r| r.verdict == MatrixVerdict::Pass)
@@ -392,7 +427,49 @@ fn run_matrix_to_root(opts: MatrixOpts, run_id: &str, root: &Path) -> Result<()>
         .filter(|r| r.verdict == MatrixVerdict::Error)
         .count();
     println!("Summary: {pass} PASS / {fail} FAIL / {skip} SKIP / {error} ERROR");
-    println!("Report: {}", root.display());
+    println!(
+        "Report: {}",
+        root.join(opts.report.artifact_name()).display()
+    );
+    if opts.ci && (fail > 0 || error > 0) {
+        bail!("matrix CI failed: {fail} FAIL / {error} ERROR");
+    }
+    Ok(())
+}
+
+pub fn prune_matrix_runs(keep_last: usize) -> Result<()> {
+    let root = PathBuf::from(".stores").join("test-matrix");
+    if !root.exists() {
+        println!("No matrix artifacts at {}", root.display());
+        return Ok(());
+    }
+    let mut runs = Vec::new();
+    for entry in std::fs::read_dir(&root)
+        .with_context(|| format!("reading matrix artifact root {}", root.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        runs.push((modified, entry.path()));
+    }
+    runs.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    let total = runs.len();
+    let mut removed = 0usize;
+    for (_, path) in runs.into_iter().skip(keep_last) {
+        std::fs::remove_dir_all(&path)
+            .with_context(|| format!("removing matrix artifact run {}", path.display()))?;
+        println!("removed {}", path.display());
+        removed += 1;
+    }
+    println!(
+        "Matrix artifacts: kept {} of {total}, removed {removed}",
+        keep_last.min(total)
+    );
     Ok(())
 }
 
@@ -401,6 +478,45 @@ fn print_coverage(label: &str, tags: &[&str]) {
         println!("  {label}: -");
     } else {
         println!("  {label}: {}", tags.join(","));
+    }
+}
+
+fn coverage_summary(specs: &[TraversalSpec]) -> MatrixCoverageSummary {
+    let mut schema_edges = BTreeSet::new();
+    let mut runner_outcomes = BTreeSet::new();
+    let mut perturbations = BTreeSet::new();
+    let mut authority_events = BTreeSet::new();
+    for spec in specs {
+        schema_edges.extend(
+            spec.coverage
+                .schema_edges
+                .iter()
+                .map(|tag| (*tag).to_string()),
+        );
+        runner_outcomes.extend(
+            spec.coverage
+                .runner_outcomes
+                .iter()
+                .map(|tag| (*tag).to_string()),
+        );
+        perturbations.extend(
+            spec.coverage
+                .perturbations
+                .iter()
+                .map(|tag| (*tag).to_string()),
+        );
+        authority_events.extend(
+            spec.coverage
+                .authority_events
+                .iter()
+                .map(|tag| (*tag).to_string()),
+        );
+    }
+    MatrixCoverageSummary {
+        schema_edges: schema_edges.into_iter().collect(),
+        runner_outcomes: runner_outcomes.into_iter().collect(),
+        perturbations: perturbations.into_iter().collect(),
+        authority_events: authority_events.into_iter().collect(),
     }
 }
 
@@ -1584,12 +1700,14 @@ fn write_index_artifact(
     run_id: &str,
     mode: MatrixMode,
     catalog: Catalog,
+    coverage: &MatrixCoverageSummary,
     results: &[MatrixCaseResult],
 ) -> Result<()> {
     let index = serde_json::json!({
         "run_id": run_id,
         "mode": mode.as_str(),
         "catalog": catalog.as_str(),
+        "coverage": coverage,
         "results": results,
     });
     std::fs::write(
@@ -1612,9 +1730,37 @@ fn write_index_artifact(
             result.artifact_dir
         ));
     }
+    md.push_str("\n## Coverage\n\n");
+    md.push_str(&format!(
+        "- schema_edges: {}\n",
+        coverage_md_list(&coverage.schema_edges)
+    ));
+    md.push_str(&format!(
+        "- runner_outcomes: {}\n",
+        coverage_md_list(&coverage.runner_outcomes)
+    ));
+    md.push_str(&format!(
+        "- perturbations: {}\n",
+        coverage_md_list(&coverage.perturbations)
+    ));
+    md.push_str(&format!(
+        "- authority_events: {}\n",
+        coverage_md_list(&coverage.authority_events)
+    ));
     std::fs::write(root.join("index.md"), md)
         .with_context(|| format!("writing {}", root.join("index.md").display()))?;
     Ok(())
+}
+
+fn coverage_md_list(tags: &[String]) -> String {
+    if tags.is_empty() {
+        "-".to_string()
+    } else {
+        tags.iter()
+            .map(|tag| format!("`{tag}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 fn verdict_label(verdict: MatrixVerdict) -> &'static str {
@@ -2352,6 +2498,8 @@ mod tests {
                 only: Some("abandon".to_string()),
                 watch: false,
                 current_ack: false,
+                report: MatrixReport::Md,
+                ci: false,
             },
             "unit-upstream-run",
             &root,
@@ -2392,6 +2540,8 @@ mod tests {
                 only: Some("queue-two-happy".to_string()),
                 watch: false,
                 current_ack: false,
+                report: MatrixReport::Md,
+                ci: false,
             },
             "unit-queue-run",
             &root,
