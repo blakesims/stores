@@ -597,12 +597,12 @@ fn run_lab_case(
         "stale-external-review-head-mutation" => {
             run_stale_external_review_head_mutation(spec, artifact_dir, watch)
         }
+        "obs-auto-promote-happy" => run_obs_auto_promote_happy_case(spec, artifact_dir, watch),
+        "reject-amend" => run_reject_amend_case(spec, artifact_dir, watch),
         "abandon" => run_upstream_abandon_case(spec, artifact_dir, watch),
-        "obs-auto-promote-happy"
-        | "reject-amend"
-        | "close-out-of-band"
-        | "resume-blocked"
-        | "retry-integration" => run_upstream_skip_case(spec, artifact_dir),
+        "close-out-of-band" => run_close_out_of_band_case(spec, artifact_dir, watch),
+        "resume-blocked" => run_resume_blocked_case(spec, artifact_dir, watch),
+        "retry-integration" => run_retry_integration_case(spec, artifact_dir, watch),
         "payload-invalid" => run_expected_harness_error_case(
             spec,
             artifact_dir,
@@ -1256,19 +1256,156 @@ fn run_stale_dead_current_run_marker(
     ))
 }
 
-fn run_upstream_skip_case(spec: &TraversalSpec, artifact_dir: &Path) -> Result<MatrixCaseResult> {
-    Ok(MatrixCaseResult {
-        id: spec.id.to_string(),
-        family: spec.family.to_string(),
-        expected: spec.expected.to_string(),
-        observed: "explicit-skip/upstream-hard-row".to_string(),
-        verdict: MatrixVerdict::Skip,
-        artifact_dir: artifact_dir.display().to_string(),
-        message: format!(
-            "upstream catalog row {} is cataloged but not executable in the Batch D MVP lab yet",
-            spec.id
-        ),
-    })
+fn run_obs_auto_promote_happy_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let conn = upstream_conn()?;
+    let obs_schema = bundled_schema_for_matrix("observations")?;
+    seed_observation_matrix(&conn, "LHU001")?;
+    let confirm = display_id_matches("confirm", "LHU001");
+    crate::handlers::transition::run(
+        &obs_schema,
+        &conn,
+        &confirm,
+        Actor::AiWithHuman.into(),
+        "confirm",
+    )?;
+    let (obs_status, obs_lifecycle, obs_contract_state): (String, String, String) = conn.query_row(
+        "SELECT status,lifecycle,contract_state FROM observations WHERE display_id='LHU001'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let confirm_history = transition_count_matrix(&conn, "observations", "LHU001", "confirm", "ai_with_human")?;
+    let ratify_history = transition_count_matrix(&conn, "observations", "LHU001", "ratify", "framework")?;
+    let agents = AgentsYaml {
+        agents: vec![AgentEntry {
+            name: "auto-promote".to_string(),
+            subscribes_to: vec![Subscription {
+                store: "observations".to_string(),
+                transition: TransitionEdge {
+                    from: "confirmed".to_string(),
+                    to: "ready".to_string(),
+                },
+                integration_step: None,
+                predicate: None,
+            }],
+            command: "builtin:auto-promote".to_string(),
+            claim_window_secs: 300,
+            retry_policy: RetryPolicy::default(),
+            command_args: None,
+        }],
+        deployment_specialist: None,
+    };
+    let cfg = PathBuf::from("/tmp/stores-test-matrix-upstream-config.yaml");
+    let dispatched = poll_once_with_guard::<FsBinaryIdentityProvider>(
+        &conn,
+        &agents,
+        &empty_policies_for_matrix(),
+        &cfg,
+        "matrix-upstream",
+        "matrix-upstream-epoch",
+        None,
+    )?;
+    let (task_id, linked_count): (String, i64) = conn.query_row(
+        "SELECT observations.task_id, COUNT(tasks.id) FROM observations JOIN tasks ON tasks.display_id=observations.task_id, json_each(tasks.linked_observations) je WHERE observations.display_id='LHU001' AND je.value='LHU001'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let task_create = transition_count_matrix(&conn, "tasks", &task_id, "create", "ai_autonomous")?;
+    let auto_promote_lock: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM dispatch_locks WHERE store='observations' AND display_id='LHU001' AND agent_name='auto-promote' AND finished_at IS NOT NULL AND terminal_reason='ok'",
+        [],
+        |r| r.get(0),
+    )?;
+    if dispatched != 1
+        || obs_status != "ready"
+        || obs_lifecycle != "ready"
+        || obs_contract_state != "approved"
+        || confirm_history != 1
+        || ratify_history != 1
+        || linked_count != 1
+        || task_create != 1
+        || auto_promote_lock != 1
+    {
+        bail!("obs auto-promote mismatch: dispatched={dispatched} obs={obs_status}/{obs_lifecycle}/{obs_contract_state} confirm={confirm_history} ratify={ratify_history} task={task_id} linked={linked_count} create={task_create} lock={auto_promote_lock}");
+    }
+    if watch {
+        println!("upstream obs-auto-promote LHU001 task={task_id} confirm={confirm_history} ratify={ratify_history} dispatched={dispatched} lock={auto_promote_lock}");
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        format!("LHU001 ready→{task_id}"),
+        "observation confirm auto-ratified and auto-promote subscriber created a linked task through poll_once_with_guard",
+    ))
+}
+
+fn run_reject_amend_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let conn = upstream_conn()?;
+    let schema = bundled_schema_for_matrix("tasks")?;
+    seed_human_verb_task_matrix(&conn, "HU002", "in_review")?;
+    let reject_matches = display_id_matches("reject", "HU002");
+    let unauthorized = crate::handlers::transition::run_reject(
+        &schema,
+        &conn,
+        &reject_matches,
+        Actor::AiAutonomous.into(),
+        "unauthorized reject",
+    );
+    if unauthorized.is_ok() {
+        bail!("reject unexpectedly allowed ai_autonomous");
+    }
+    crate::handlers::transition::run_reject(
+        &schema,
+        &conn,
+        &reject_matches,
+        Actor::Human.into(),
+        "matrix reject reason",
+    )?;
+    let amend_matches = display_id_matches("amend", "HU002");
+    let amend_unauth = crate::handlers::transition::run(
+        &schema,
+        &conn,
+        &amend_matches,
+        Actor::AiAutonomous.into(),
+        "amend",
+    );
+    if amend_unauth.is_ok() {
+        bail!("amend unexpectedly allowed ai_autonomous");
+    }
+    crate::handlers::transition::run(
+        &schema,
+        &conn,
+        &amend_matches,
+        Actor::AiWithHuman.into(),
+        "amend",
+    )?;
+    let (status, lifecycle, active_step): (String, String, String) = task_tuple_matrix(&conn, "HU002")?;
+    let reject_history = transition_count_matrix(&conn, "tasks", "HU002", "reject", "human")?;
+    let amend_history = transition_count_matrix(&conn, "tasks", "HU002", "amend", "ai_with_human")?;
+    let wrap_has_reason: i64 = conn.query_row(
+        "SELECT CASE WHEN wrap_log LIKE '%matrix reject reason%' THEN 1 ELSE 0 END FROM tasks WHERE display_id='HU002'",
+        [],
+        |r| r.get(0),
+    )?;
+    if status != "planning" || lifecycle != "active" || active_step != "planning" || reject_history != 1 || amend_history != 1 || wrap_has_reason != 1 {
+        bail!("reject/amend mismatch: {status}/{lifecycle}/{active_step} reject={reject_history} amend={amend_history} reason={wrap_has_reason}");
+    }
+    if watch {
+        println!("upstream reject-amend HU002 status={status} reject={reject_history} amend={amend_history}");
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "HU002 in_review→rejected→planning",
+        "real reject and amend handlers enforced actor tiers and recorded transition_history",
+    ))
 }
 
 fn run_upstream_abandon_case(
@@ -1320,6 +1457,157 @@ fn run_upstream_abandon_case(
         artifact_dir,
         "HU001 planning→abandoned via real run_abandon handler",
         "real human-verb lab fired the abandon transition handler and verified status, reason, and transition_history",
+    ))
+}
+
+fn run_close_out_of_band_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let conn = upstream_conn()?;
+    let schema = bundled_schema_for_matrix("tasks")?;
+    seed_human_verb_task_matrix(&conn, "HU003", "planning")?;
+    let commit = git_sha_matrix(Path::new("."), "main")?;
+    let matches = clap::Command::new("close-out-of-band")
+        .arg(clap::Arg::new("display_id").required(true).index(1))
+        .arg(clap::Arg::new("commit").long("commit").required(true))
+        .get_matches_from(["close-out-of-band", "HU003", "--commit", commit.as_str()]);
+    let unauthorized = crate::handlers::transition::run_close_out_of_band(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        &commit,
+    );
+    if unauthorized.is_ok() {
+        bail!("close-out-of-band unexpectedly allowed ai_autonomous");
+    }
+    crate::handlers::transition::run_close_out_of_band(
+        &schema,
+        &conn,
+        &matches,
+        Actor::Human.into(),
+        &commit,
+    )?;
+    let (status, lifecycle, active_step): (String, String, String) = task_tuple_matrix(&conn, "HU003")?;
+    let history = transition_count_matrix(&conn, "tasks", "HU003", "close-out-of-band", "human")?;
+    let note: Option<String> = conn.query_row(
+        "SELECT actor_note FROM transition_history WHERE store='tasks' AND display_id='HU003' AND verb='close-out-of-band' ORDER BY id DESC LIMIT 1",
+        [],
+        |r| r.get(0),
+    )?;
+    if status != "closed_out_of_band" || lifecycle != "done" || active_step != "none" || history != 1 || note.as_deref() != Some(commit.as_str()) {
+        bail!("close-out-of-band mismatch: {status}/{lifecycle}/{active_step} history={history} note={note:?}");
+    }
+    if watch {
+        println!("upstream close-out-of-band HU003 commit={} history={history}", &commit[..7]);
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "HU003 planning→closed_out_of_band",
+        "real close-out-of-band handler validated reachable main SHA and recorded actor_note provenance",
+    ))
+}
+
+fn run_resume_blocked_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let conn = upstream_conn()?;
+    let schema = bundled_schema_for_matrix("tasks")?;
+    seed_human_verb_task_matrix(&conn, "HU004", "blocked")?;
+    conn.execute("UPDATE tasks SET blocked=1, blocker_kind='runner', active_step='none', blocked_reason='matrix blocked' WHERE display_id='HU004'", [])?;
+    let matches = display_id_matches("resume", "HU004");
+    let unauthorized = crate::handlers::transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        "resume",
+    );
+    if unauthorized.is_ok() {
+        bail!("resume unexpectedly allowed ai_autonomous");
+    }
+    crate::handlers::transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiWithHuman.into(),
+        "resume",
+    )?;
+    let (status, lifecycle, active_step): (String, String, String) = task_tuple_matrix(&conn, "HU004")?;
+    let (blocked, blocker_kind): (i64, Option<String>) = conn.query_row(
+        "SELECT blocked, blocker_kind FROM tasks WHERE display_id='HU004'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let history = transition_count_matrix(&conn, "tasks", "HU004", "resume", "ai_with_human")?;
+    if status != "planning" || lifecycle != "active" || active_step != "planning" || blocked != 0 || blocker_kind.is_some() || history != 1 {
+        bail!("resume mismatch: {status}/{lifecycle}/{active_step} blocked={blocked} kind={blocker_kind:?} history={history}");
+    }
+    if watch {
+        println!("upstream resume-blocked HU004 status={status} history={history}");
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "HU004 blocked→planning",
+        "real resume transition cleared blocked overlay with ai_with_human authority",
+    ))
+}
+
+fn run_retry_integration_case(
+    spec: &TraversalSpec,
+    artifact_dir: &Path,
+    watch: bool,
+) -> Result<MatrixCaseResult> {
+    let conn = upstream_conn()?;
+    let schema = bundled_schema_for_matrix("tasks")?;
+    seed_human_verb_task_matrix(&conn, "HU005", "integration_blocked")?;
+    conn.execute("UPDATE tasks SET lifecycle='integration', active_step='none', integration_step='none', blocked=1, blocker_kind='main_red', integration_blocked_reason='matrix retry' WHERE display_id='HU005'", [])?;
+    let matches = display_id_matches("retry-integration", "HU005");
+    let unauthorized = crate::handlers::transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiAutonomous.into(),
+        "retry-integration",
+    );
+    if unauthorized.is_ok() {
+        bail!("retry-integration unexpectedly allowed ai_autonomous");
+    }
+    crate::handlers::transition::run(
+        &schema,
+        &conn,
+        &matches,
+        Actor::AiWithHuman.into(),
+        "retry-integration",
+    )?;
+    let (status, lifecycle, integration_step): (String, String, String) = conn.query_row(
+        "SELECT status,lifecycle,integration_step FROM tasks WHERE display_id='HU005'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    let (blocked, blocker_kind): (i64, Option<String>) = conn.query_row(
+        "SELECT blocked, blocker_kind FROM tasks WHERE display_id='HU005'",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let history = transition_count_matrix(&conn, "tasks", "HU005", "retry-integration", "ai_with_human")?;
+    if status != "integration_queued" || lifecycle != "integration" || integration_step != "none" || blocked != 0 || blocker_kind.is_some() || history != 1 {
+        bail!("retry-integration mismatch: {status}/{lifecycle}/{integration_step} blocked={blocked} kind={blocker_kind:?} history={history}");
+    }
+    if watch {
+        println!("upstream retry-integration HU005 status={status} history={history}");
+    }
+    Ok(queue_result_pass(
+        spec,
+        artifact_dir,
+        "HU005 integration_blocked→integration_queued",
+        "real retry-integration transition requeued integration with ai_with_human authority",
     ))
 }
 
@@ -1786,6 +2074,86 @@ fn git_sha_matrix(repo: &Path, rev: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+fn upstream_conn() -> Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch(SUBSTRATE_DDL)?;
+    for name in ["tasks", "observations", "external_reviews", "intake"] {
+        let schema = bundled_schema_for_matrix(name)?;
+        conn.execute_batch(&ddl_for(&schema))?;
+    }
+    Ok(conn)
+}
+
+fn display_id_matches(verb: &str, display_id: &str) -> clap::ArgMatches {
+    clap::Command::new("matrix-verb")
+        .arg(clap::Arg::new("display_id").required(true).index(1))
+        .get_matches_from([verb, display_id])
+}
+
+fn transition_count_matrix(
+    conn: &Connection,
+    store: &str,
+    display_id: &str,
+    verb: &str,
+    invoker: &str,
+) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM transition_history WHERE store=?1 AND display_id=?2 AND verb=?3 AND invoker=?4",
+        params![store, display_id, verb, invoker],
+        |r| r.get(0),
+    ).with_context(|| format!("count transition {store}/{display_id}/{verb}/{invoker}"))
+}
+
+fn task_tuple_matrix(conn: &Connection, display_id: &str) -> Result<(String, String, String)> {
+    conn.query_row(
+        "SELECT status,lifecycle,active_step FROM tasks WHERE display_id=?1",
+        [display_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).with_context(|| format!("read task tuple for {display_id}"))
+}
+
+fn row_json_matrix(conn: &Connection, table: &str, display_id: &str) -> Result<serde_json::Value> {
+    let sql = format!("SELECT * FROM {table} WHERE display_id=?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+    let mut rows = stmt.query([display_id])?;
+    let row = rows.next()?.with_context(|| format!("missing row {table}/{display_id}"))?;
+    let mut obj = serde_json::Map::new();
+    for (i, name) in cols.iter().enumerate() {
+        let v: rusqlite::types::Value = row.get(i)?;
+        let jv = match v {
+            rusqlite::types::Value::Null => serde_json::Value::Null,
+            rusqlite::types::Value::Integer(n) => serde_json::Value::from(n),
+            rusqlite::types::Value::Real(f) => serde_json::json!(f),
+            rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
+            rusqlite::types::Value::Blob(b) => serde_json::Value::String(String::from_utf8_lossy(&b).to_string()),
+        };
+        obj.insert(name.clone(), jv);
+    }
+    Ok(serde_json::Value::Object(obj))
+}
+
+fn seed_observation_matrix(conn: &Connection, display_id: &str) -> Result<()> {
+    let now = "2026-05-18T00:00:00Z";
+    let intent_contract = serde_json::json!({
+        "contract_state":"ready",
+        "objective":"auto-promote matrix objective",
+        "type":"work",
+        "in_scope":["prove auto-promote"],
+        "out_of_scope":["production mutation"],
+        "acceptance":["linked task exists"],
+        "tier_hint":"T1",
+        "approved_by":"blake",
+        "approved_at":now
+    });
+    conn.execute(
+        "INSERT INTO observations (display_id,status,summary,source,priority,captured_at,intent_contract,lifecycle,contract_state,waiting,waiting_kind,pending_architecture_review,created_at,updated_at,created_by,updated_by) \
+         VALUES (?1,'investigating','matrix auto promote','dev','normal',?2,?3,'candidate','draft',1,'human_ratification',0,?2,?2,'stores-test','stores-test')",
+        params![display_id, now, serde_json::to_string(&intent_contract)?],
+    )?;
+    Ok(())
+}
+
 fn seed_human_verb_task_matrix(conn: &Connection, display_id: &str, status: &str) -> Result<()> {
     let now = "2026-05-18T00:00:00Z";
     let contract =
@@ -2057,7 +2425,7 @@ fn upstream_specs() -> Vec<TraversalSpec> {
             id: "obs-auto-promote-happy",
             family: "upstream",
             description: "ready observation contract auto-promotes into a task",
-            expected: "skip/auto-promote-lab-not-wired-yet",
+            expected: "observation-promoted",
             coverage: CoverageTags {
                 schema_edges: vec!["observations:ready:auto-promote:ready"],
                 runner_outcomes: vec![],
@@ -2069,7 +2437,7 @@ fn upstream_specs() -> Vec<TraversalSpec> {
             id: "reject-amend",
             family: "human-verb",
             description: "human rejects an in-review task and an amended contract reopens planning",
-            expected: "skip/reject-amend-lab-not-wired-yet",
+            expected: "rejected-then-amended",
             coverage: CoverageTags {
                 schema_edges: vec![
                     "tasks:in_review:reject:rejected",
@@ -2096,7 +2464,7 @@ fn upstream_specs() -> Vec<TraversalSpec> {
             id: "close-out-of-band",
             family: "human-verb",
             description: "human closes a task as shipped outside the substrate",
-            expected: "skip/close-out-of-band-git-lab-not-wired-yet",
+            expected: "closed-out-of-band",
             coverage: CoverageTags {
                 schema_edges: vec!["tasks:planning:close-out-of-band:closed_out_of_band"],
                 runner_outcomes: vec![],
@@ -2108,7 +2476,7 @@ fn upstream_specs() -> Vec<TraversalSpec> {
             id: "resume-blocked",
             family: "human-verb",
             description: "human resumes a blocked task back to planning",
-            expected: "skip/resume-lab-not-wired-yet",
+            expected: "resumed-to-planning",
             coverage: CoverageTags {
                 schema_edges: vec!["tasks:blocked:resume:planning"],
                 runner_outcomes: vec![],
@@ -2120,7 +2488,7 @@ fn upstream_specs() -> Vec<TraversalSpec> {
             id: "retry-integration",
             family: "human-verb",
             description: "human retries a typed integration-blocked task back into the queue",
-            expected: "skip/retry-integration-lab-not-wired-yet",
+            expected: "integration-requeued",
             coverage: CoverageTags {
                 schema_edges: vec!["tasks:integration_blocked:retry-integration:integration_queued"],
                 runner_outcomes: vec![],
