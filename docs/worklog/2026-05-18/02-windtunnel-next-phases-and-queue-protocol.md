@@ -276,13 +276,45 @@ stores test matrix prune --keep-last 9999
 # PASS, no removals in validation run
 ```
 
-Remaining windtunnel gaps after bulk pass:
+Remaining windtunnel gaps after bulk pass are now closed by Phases F-J:
 
-- Turn Batch C's `stale-external-review-head-mutation` useful RED into GREEN.
-- Implement skipped Batch C rows: duplicate-drive refusal and stale/dead current-run marker truth.
-- Implement skipped Batch D rows: observation auto-promote, reject/amend, close-out-of-band, resume-blocked, retry-integration.
-- Improve artifact bundles with structured stdout/transcript/task/ER/git/transition facts; current reports are useful but still thin.
-- Add richer schema-transition coverage/waiver checking beyond aggregate coverage tags.
+- **Phase F — GREEN.** `533748d6 test: complete battlescar windtunnel rows` turns `battlescars` into `8 PASS / 0 FAIL / 0 SKIP / 0 ERROR`, including typed `NeedsReview`, duplicate-drive refusal, and stale/dead marker truth.
+- **Phase G — GREEN.** `30796ac6 test: complete upstream windtunnel rows` turns `upstream` into `6 PASS / 0 FAIL / 0 SKIP / 0 ERROR`, including auto-promote via subscriber dispatch and all human verbs.
+- **Phase H — GREEN.** `57357e29 test: harden matrix artifacts` adds per-case manifests, structured evidence artifacts, and mechanical artifact validation for executable rows.
+- **Phase I — GREEN.** `aa4072d9 test: add matrix coverage gate` makes `full` aggregate smoke+queue+battlescars+upstream, computes executed coverage from per-case transition artifacts, adds waivers, and makes CI fail on FAIL/ERROR/SKIP plus full-catalog uncovered gaps.
+- **Phase J — GREEN.** Full completion gate passed, including current-mode stale proof. The current proof intentionally created marker commit `1719dce0 fake-run(T030): stale-base main advance` and artifact `.stores/test-matrix/run-1779096329-1897362/git-stale-base-refuses/current_mode_proof.json`.
+
+Final Phase J validation:
+
+```bash
+cargo test -q cli::test --bin stores
+# PASS: 37 tests
+
+stores test matrix --mode lab --catalog smoke --ci --report json
+# PASS: 5 PASS / 0 FAIL / 0 SKIP / 0 ERROR
+
+stores test matrix --mode lab --catalog queue --ci --report json
+# PASS: 4 PASS / 0 FAIL / 0 SKIP / 0 ERROR
+
+stores test matrix --mode lab --catalog battlescars --ci --report json
+# PASS: 8 PASS / 0 FAIL / 0 SKIP / 0 ERROR
+
+stores test matrix --mode lab --catalog upstream --ci --report json
+# PASS: 6 PASS / 0 FAIL / 0 SKIP / 0 ERROR
+
+stores test matrix --mode lab --catalog full --ci --report json
+# PASS: 23 PASS / 0 FAIL / 0 SKIP / 0 ERROR
+
+stores test enumerate --catalog full --coverage
+# PASS: covered transitions reported, uncovered '-', temporary waivers explicit
+
+stores test matrix prune --keep-last 20
+# PASS: kept 20 matrix artifact runs, removed 69
+
+stores test matrix --mode current --only git-stale-base-refuses \
+  --watch --i-understand-this-mutates-current-repo
+# PASS: 1 PASS / 0 FAIL / 0 SKIP / 0 ERROR; typed NeedsReview; no unfinished integrate lock; no real LLM
+```
 
 ## Later-phase completion contracts
 
