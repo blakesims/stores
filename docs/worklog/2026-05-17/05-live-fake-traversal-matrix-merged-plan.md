@@ -399,12 +399,63 @@ For future substrate work:
 6. Commit case + fix with proof.
 7. Use `--mode current` only when the bug depends on active repo/live DB residue.
 
-## Immediate next action
+## Progress as of 2026-05-18
 
-Have a reviewer review this merged plan. Then start Phase 0 with worker → reviewer chains. Do not proceed to broad matrix orchestration until Phase 0 safety/lab-mode foundations are reviewed.
+Shipped and reviewed:
+
+- **Phase 0 — safety/lab foundation:** live-path raw SQL retry-freeze was removed, fake env restoration and fake-runner preflight tests were added, minimal lab arena creation exists, and current-mode fake-review acceptance is provenance-guarded before any `tasks accept` call.
+- **Phase 1 — DSL/enumeration/expectation:** `stores test enumerate --catalog smoke|full --coverage` exists; case DSL rejects consequence-faking fields outside `$.cases.<case-id>.expect`; `VisitedEdge` supports status/lifecycle/active-step/integration-step/verb/invoker ordered-subsequence matching over `transition_history`.
+- **Phase 2 — lab matrix MVP:** `stores test matrix --mode lab` exists, writes artifacts under `.stores/test-matrix/<run-id>/`, and distinguishes PASS/FAIL/SKIP/ERROR. Lab smoke currently runs four executable fake-only rows and skips the current-only stale-freshness row:
+  - `T3-hp-with-substeps` PASS;
+  - `T3-pr1` PASS, with durable loop-count assertion (`planner=2`, `plan_reviewer=2`);
+  - `T3-cr1` PASS, with durable loop-count assertion (`executor=2`, `code_reviewer=2`);
+  - `T3-er-tooling` PASS;
+  - `git-stale-base-refuses` SKIP in lab mode.
+- **Phase 3 — current-mode proof:** `stores test matrix --mode current` requires `--i-understand-this-mutates-current-repo`. The current-mode `git-stale-base-refuses` row ran through the real current repo/DB/daemon path with fake runners only and produced a real matrix FAIL, not ERROR.
+
+Current proof commands:
+
+```bash
+cargo test -q cli::test --bin stores
+# PASS: 32 tests
+
+stores test matrix --mode lab --catalog smoke --watch
+# 4 PASS / 0 FAIL / 1 SKIP / 0 ERROR
+
+stores test matrix --mode current --only git-stale-base-refuses \
+  --watch --i-understand-this-mutates-current-repo
+# 0 PASS / 1 FAIL / 0 SKIP / 0 ERROR
+```
+
+The current RED produced task `T019`, a fake external review PASS, a real fenced main marker commit (`88b7e276 fake-run(T019): stale-base main advance`), then integration parked at `integrating/task_review` with `integration_attempts=null` and an unfinished integrate lock instead of emitting a typed freshness decision/recovery. The matrix proved this as a substrate FAIL while also proving `no_real_llm=ok`.
+
+## Revised next action
+
+Do **not** jump straight to more catalog rows. First fix the stale-freshness semantics exposed by `git-stale-base-refuses`.
+
+The decision is no longer simply “hard block vs auto-review.” The better next design is a typed freshness classifier that distinguishes:
+
+- `Fresh` — land;
+- `RefreshOnly` — main moved but reviewed/tested scope is unaffected;
+- `RetestRequired` — review remains valid but test/pre-land evidence is stale;
+- `ReReviewRequired` — main or branch changes invalidate review evidence;
+- `Conflict` — refresh/merge conflict needs resolution;
+- `StaleBaseHistoryRewrite` — reviewed base is no longer reachable;
+- `BranchHeadChanged` — candidate changed after review.
+
+Next implementation target:
+
+1. Add a pure freshness classifier and tests around base/head/scope/risk inputs.
+2. Wire integration so stale freshness produces a typed decision and releases/finalizes locks; no limbo at `integrating/task_review`.
+3. Update the matrix expectation for `git-stale-base-refuses` from “must hard-block” to “must not integrate, must not wedge, must emit typed freshness decision/next action.”
+4. Re-run current-mode row RED→GREEN.
 
 ## Follow-ups
 
 - Track any existing WIP rows/artifacts separately from lab-mode work.
 - Keep old plan/review notes intact as source material.
-- If Phase 2 reproduces the stale freshness RED, file or link the substrate fix target before fixing it.
+- Improve artifact bundles: current-mode proof is mostly stdout today; copy structured task/ER/git/transition facts into `proof.txt`/`result.json`.
+- Add non-mutating tests for the current-mode ack gate.
+- After stale-freshness GREEN, continue Phase 4 battlescars: dirty worktree, merge conflict, stale head mutation, duplicate drive, no heartbeat, nonzero exit, payload invalid.
+- Phase 5 remains observation/intake entry and human-verb catalog.
+- Phase 6 remains coverage/reporting/CI/prune work.
