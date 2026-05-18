@@ -244,6 +244,46 @@ This enables high-throughput behavior without over-reviewing harmless main movem
 
 The goal is to complete the windtunnel enough that it is broadly useful, not just one RED fix.
 
+### Batch completion status as of 2026-05-18
+
+Bulk execution completed after oracle review of this note:
+
+- **Batch A — GREEN.** `7cb88425 fix: record needs-review freshness decisions` maps stale ER/head freshness to typed `NeedsReview`, finalizes integration attempts/locks, and flips current-mode `git-stale-base-refuses` from FAIL to PASS with fake runners only.
+- **Batch B — GREEN MVP.** `b6fc52e4 test: add queue windtunnel catalog` adds `queue` catalog with four executable lab rows: two-happy serial queue, overlap NeedsReview, branch-head-changed NeedsReview, and conflict blocked. `stores test matrix --mode lab --catalog queue --watch` produced `4 PASS / 0 FAIL / 0 SKIP / 0 ERROR`.
+- **Batch C — useful RED MVP.** `c96c2f93 test: add battlescar windtunnel catalog` adds `battlescars` catalog. Validation produced `5 PASS / 1 FAIL / 2 SKIP / 0 ERROR`: dirty worktree, merge conflict, payload-invalid, nonzero-exit, no-heartbeat PASS; stale external-review head mutation is a useful RED; duplicate-drive and stale/dead marker are explicit SKIP.
+- **Batch D — MVP.** `1c58c4ef test: add upstream windtunnel catalog` adds `upstream` catalog. Validation produced `1 PASS / 0 FAIL / 5 SKIP / 0 ERROR`: real `abandon` human-verb row PASS; observation auto-promote and other human verbs are explicit SKIP.
+- **Batch E — GREEN MVP.** `48a4293e test: add matrix reporting controls` adds `--report md|json`, `--ci`, `matrix prune --keep-last`, and coverage summaries in reports.
+
+Latest focused validation:
+
+```bash
+cargo test -q cli::test --bin stores
+# PASS: 37 tests
+
+stores test matrix --mode lab --catalog queue --watch
+# PASS: 4 PASS / 0 FAIL / 0 SKIP / 0 ERROR
+
+stores test matrix --mode lab --catalog battlescars --watch
+# Useful RED: 5 PASS / 1 FAIL / 2 SKIP / 0 ERROR
+
+stores test matrix --mode lab --catalog upstream --watch
+# MVP: 1 PASS / 0 FAIL / 5 SKIP / 0 ERROR
+
+stores test matrix --catalog upstream --only abandon --report json --ci
+# PASS and reports index.json
+
+stores test matrix prune --keep-last 9999
+# PASS, no removals in validation run
+```
+
+Remaining windtunnel gaps after bulk pass:
+
+- Turn Batch C's `stale-external-review-head-mutation` useful RED into GREEN or decide it is covered by Batch A's current-mode stale row and remove/rename it.
+- Implement skipped Batch C rows: duplicate-drive refusal and stale/dead current-run marker truth.
+- Implement skipped Batch D rows: observation auto-promote, reject/amend, close-out-of-band, resume-blocked, retry-integration.
+- Improve artifact bundles with structured stdout/transcript/task/ER/git/transition facts; current reports are useful but still thin.
+- Add richer schema-transition coverage/waiver checking beyond aggregate coverage tags.
+
 ### Batch A — Fix current RED and queue protocol foundation
 
 Batch A implementation contract after oracle review:
