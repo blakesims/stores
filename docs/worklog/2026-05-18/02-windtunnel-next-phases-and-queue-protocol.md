@@ -21,6 +21,38 @@ The key next design is not a speculative merge train. It is a **serial integrati
 - HTML mockup: `http://zen:6067/reports/20260517-152409-stores-live-fake-matrix-mockup/`
 - Freshness options report: `http://zen:6067/reports/20260518-062347-freshness-red-next-steps/`
 
+## Reviewed base plan preserved here
+
+This note does **not** replace the heavily reviewed original plan. It preserves that plan by reference and maps its reviewed phases into the current batch execution plan.
+
+Reviewed source material:
+
+- `docs/worklog/2026-05-17/01-live-fake-traversal-matrix-plan.md` — original four-dimension model: state-machine edges × runner output alphabet × real perturbations × authority events; scenario DSL; synthetic/test authority; proof artifacts; smoke/battlescar/upstream/report phases.
+- `docs/worklog/2026-05-17/02-live-fake-traversal-matrix-plan-review.md` — review pressure: raw-SQL audit, fail-closed authority/provenance, artifact cleanup, DSL parse-time consequence-faking rejection, no-LLM leakage tests.
+- `docs/worklog/2026-05-17/03-live-fake-traversal-matrix-plan-v2.md` — concrete matrix product: `transition_history` path oracle, stable case IDs, `stores test matrix`, per-case artifact bundle, report shape.
+- `docs/worklog/2026-05-17/04-traversal-matrix-plan-v2-review.md` — corrections: active/integration-step path assertions, honest runtime, tier-A/tier-B distinction, catalog gaps, L046 timing, integration-blocked induction.
+- `docs/worklog/2026-05-17/05-live-fake-traversal-matrix-merged-plan.md` — canonical merged plan with lab/current mode correction and phased implementation.
+- `docs/worklog/2026-05-17/06-live-fake-traversal-matrix-merged-plan-review.md` — merged plan review; passed Phase 0 start.
+
+Original reviewed phase map:
+
+| Original phase | Reviewed intent | Current status / current batch |
+|---|---|---|
+| Phase 0 — Safety/lab foundation | Remove live raw-SQL shortcuts; fake-mode preflight; no env leakage; test provenance; lab arena. | **Done** via `6b04b53c`. Follow-ups: richer TestAuthority/token semantics and structured artifacts. |
+| Phase 1 — DSL/enumeration/expectation | `stores test enumerate`; catalog IDs; forbidden consequence fields; `transition_history` ordered path oracle including active/integration steps. | **Done** via `ed8c9966`. |
+| Phase 2 — Lab matrix MVP | `stores test matrix --mode lab`; PASS/FAIL/SKIP/ERROR; artifacts; executable smoke. | **Mostly done** via `283e4ad3` and `b38f3e2a`: 4 lab smoke rows PASS, current-only stale row SKIP in lab. |
+| Phase 3 — Current-mode opt-in | Explicit dangerous opt-in; current repo/DB/daemon proof; fake-only assertion. | **Done** via `bc2f1e7f`: current stale row produces real FAIL, not ERROR. |
+| Phase 4 — Battlescar expansion | Git/liveness/duplicate-drive/freshness rows; each row PASSes or emits useful RED. | **Next**, split into Batch A (freshness/queue foundation), Batch B (queue rows), Batch C (battlescars). |
+| Phase 5 — Observation/intake + human verbs | Observation auto-promote, L046 timing, reject/amend, abandon, close-out-of-band, resume, retry. | Batch D. |
+| Phase 6 — Coverage/reporting/CI | HTML/JSON reports, schema coverage, CI mode, prune/list/show artifacts. | Batch E. |
+
+Direction has **not** changed. The only architectural amendment is the queue/freshness protocol below: reviewed branches enter a serial integration queue; authoritative freshness classification/testing happens at queue front; queued-behind items are not eagerly invalidated/re-reviewed when main moves.
+
+Review status:
+
+- Original windtunnel phases were heavily reviewed and remain valid.
+- This note adds the queue/freshness amendment and batch execution mapping. That amendment should receive oracle/reviewer pressure before Batch A implementation, but the already-reviewed Phase 0–3 work does not need replanning.
+
 ## Work already done
 
 Shipped commits include:
