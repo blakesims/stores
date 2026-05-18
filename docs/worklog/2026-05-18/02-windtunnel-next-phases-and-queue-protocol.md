@@ -278,11 +278,175 @@ stores test matrix prune --keep-last 9999
 
 Remaining windtunnel gaps after bulk pass:
 
-- Turn Batch C's `stale-external-review-head-mutation` useful RED into GREEN or decide it is covered by Batch A's current-mode stale row and remove/rename it.
+- Turn Batch C's `stale-external-review-head-mutation` useful RED into GREEN.
 - Implement skipped Batch C rows: duplicate-drive refusal and stale/dead current-run marker truth.
 - Implement skipped Batch D rows: observation auto-promote, reject/amend, close-out-of-band, resume-blocked, retry-integration.
 - Improve artifact bundles with structured stdout/transcript/task/ER/git/transition facts; current reports are useful but still thin.
 - Add richer schema-transition coverage/waiver checking beyond aggregate coverage tags.
+
+## Later-phase completion contracts
+
+These phases convert the post-bulk gaps into explicit completion gates. The earlier “MVP GREEN” bar is no longer sufficient: each listed row/feature must be executable, asserted with real substrate consequences, and mechanically checked by the stated command. `SKIP` is not acceptable for these phases unless a phase explicitly introduces a durable waiver row and the done_when count is updated in this note.
+
+### Phase F — Complete Batch C battlescar/liveness truth
+
+Objective: turn the `battlescars` catalog from useful-RED MVP into a complete executable liveness/regression suite for known integration, runner, and drive scars.
+
+Rows/features:
+
+1. `stale-external-review-head-mutation` becomes GREEN with typed `NeedsReview` evidence. Do not retire it in Phase F; if later proven duplicate, that requires a separate documented waiver phase.
+2. `duplicate-drive-refusal` becomes executable and proves duplicate/manual drive cannot create double-dispatch or corrupt active run state.
+3. `stale-dead-current-run-marker` becomes executable and proves stale/dead run-marker truth is detected and handled deterministically.
+4. Existing GREEN rows stay GREEN: dirty worktree refusal, merge conflict blocked, payload invalid, nonzero exit, and no heartbeat.
+
+Done when:
+
+```bash
+cargo test -q cli::test --bin stores
+stores test matrix --mode lab --catalog battlescars --watch
+# Required: 8 PASS / 0 FAIL / 0 SKIP / 0 ERROR
+```
+
+Acceptance criteria:
+
+- No real LLM calls.
+- No raw SQL writes outside isolated lab seeding helpers; no direct final-outcome SQL faking.
+- No harness-only consequence faking: substrate handlers/daemon paths produce the final status/evidence.
+- Each row asserts at least one durable evidence source relevant to the scar: task row/status/lifecycle/step, transition history, dispatch lock/run state, integration attempts, and/or git SHA/worktree facts.
+- `stale-external-review-head-mutation` asserts `integration_attempts[-1].outcome = "needs_review"`, `freshness_decision = "NeedsReview"`, nonempty `completed_at`, and no unfinished integrate lock.
+- `duplicate-drive-refusal` asserts there is no second active drive/dispatch for the same task and records the refusal/held reason.
+- `stale-dead-current-run-marker` distinguishes a live current run from a stale/dead marker; it must not blindly delete state.
+- Failure mode for each row is PASS/FAIL with evidence, not ERROR or wedge.
+
+Non-goals: no merge train, no broad queue redesign, no real agent/LLM execution, no observation/human-verb expansion.
+
+### Phase G — Complete Batch D upstream and human-verb truth
+
+Objective: turn the `upstream` catalog from one real `abandon` row plus skips into an executable lab suite for observation/intake promotion and human lifecycle verbs.
+
+Rows/features:
+
+1. `obs-auto-promote-happy`: observation contract approval/test authority triggers auto-promote into a linked task.
+2. `reject-amend`: reject path and amend/reopen path use real transition handlers and record transition history.
+3. `abandon`: keep existing PASS row.
+4. `close-out-of-band`: prove close-out-of-band records shipped/manual outcome and does not masquerade as normal integration.
+5. `resume-blocked`: blocked task resumes through the real transition path.
+6. `retry-integration`: integration-blocked task retries through the real integration retry path.
+
+Done when:
+
+```bash
+cargo test -q cli::test --bin stores
+stores test matrix --mode lab --catalog upstream --watch
+# Required: 6 PASS / 0 FAIL / 0 SKIP / 0 ERROR
+```
+
+Acceptance criteria:
+
+- Uses real transition handlers/subscribers, not direct final-state edits.
+- Actor/authority expectations are asserted by tier:
+  - `reject`, `abandon`, and `close-out-of-band` are human-tier rows and must show successful authorized lab/test-human execution plus transition-history invoker evidence.
+  - `amend`, `resume`, and `retry-integration` are ai-with-human-tier rows and must show successful authorized lab/test-ai-with-human execution plus transition-history invoker evidence.
+  - At least one unauthorized/fail-closed check per tier/class must be exercised somewhere in the upstream catalog or a companion unit test.
+- `obs-auto-promote-happy` proves observation → approved contract/test authority → task promotion with durable link/evidence.
+- Human verb rows assert final task status/lifecycle/step, transition history event, reason/comment fields where applicable, and no unrelated task mutation.
+- `retry-integration` asserts a real integration retry edge and resulting queue/block/integration behavior.
+- No real LLM calls.
+
+Non-goals: no production human-token UX redesign, no new observation lifecycle architecture, no current-mode mutation requirement unless a row explicitly needs it.
+
+### Phase H — Artifact bundle and report hardening
+
+Objective: make matrix failures self-diagnosing by bundling structured substrate/git/runner evidence, not just a summary line.
+
+Features:
+
+- Every executable case artifact directory has an `artifact_manifest.json` listing required files, generated files, and explicit `not_applicable` reasons.
+- Required/conditional files include: `summary.json`, `task.json`, `transition_history.json`, `dispatch_locks.json`, `agent_runs.json`, `external_reviews.json`, `integration_attempts.json`, `git.json`, bounded `stdout.txt`/`stderr.txt` or `transcript.txt`, and `no_llm.json`.
+- JSON/Markdown reports link to per-case artifacts and include verdict counts, per-case expected vs actual, artifact paths, and coverage tags.
+- Add a mechanical artifact validator used by tests or by `stores test matrix` itself; replace spot checks with machine checks for every executable row.
+
+Done when:
+
+```bash
+cargo test -q cli::test --bin stores
+stores test matrix --mode lab --catalog smoke --report json --watch
+stores test matrix --mode lab --catalog battlescars --report json --watch
+stores test matrix --mode lab --catalog upstream --report json --watch
+# Required: artifact validator passes for every PASS/FAIL executable row in these runs.
+```
+
+Acceptance criteria:
+
+- Artifacts are generated for FAIL as well as PASS.
+- Missing conditional files must be explained in `artifact_manifest.json` with a bounded not-applicable reason.
+- Artifact capture must not hide or mutate the underlying outcome.
+- Prune keeps/removes only matrix artifact directories, not live substrate data.
+
+Non-goals: no polished HTML redesign, no long-term retention policy beyond prune controls, no unbounded full trace capture.
+
+### Phase I — Schema transition coverage and waiver gate
+
+Objective: make coverage precise enough to show which schema transitions are covered, uncovered, or intentionally waived.
+
+Features:
+
+- Expand `full` catalog semantics or add an equivalent aggregate so the full coverage gate includes smoke, queue, battlescars, and upstream rows. The implementation must not silently mean only the old smoke+extra catalog.
+- `stores test enumerate --catalog full --coverage` reports covered transitions, uncovered transitions, waived transitions with rationale, and catalog rows responsible for each covered transition.
+- Matrix reports include the same coverage summary.
+- Enhance `--ci` or add an explicit stricter flag so CI fails mechanically on unexpected FAIL/ERROR, accidental SKIP, and unwaived required transition gaps.
+
+Done when:
+
+```bash
+cargo test -q cli::test --bin stores
+stores test enumerate --catalog full --coverage
+stores test matrix --mode lab --catalog full --ci --report json
+# Required: 0 unexpected FAIL, 0 ERROR, 0 accidental SKIP, 0 unwaived required transition gaps.
+```
+
+Acceptance criteria:
+
+- Coverage is tied to real asserted transition/history paths, not only row labels.
+- Waivers are explicit and durable: transition id/name, reason, owner/context, and temporary/permanent classification.
+- CI distinguishes expected/useful RED only if explicitly waived, accidental FAIL, unsupported SKIP, and infrastructure ERROR.
+- Existing smoke, queue, battlescars, and upstream catalogs remain runnable individually.
+
+Non-goals: no requirement to cover every theoretical transition if the waiver is explicit and justified; no schema redesign unless coverage extraction exposes a blocking model gap.
+
+### Phase J — Full windtunnel completion gate
+
+Objective: declare the no-LLM windtunnel complete for the current plan.
+
+Done when:
+
+```bash
+cargo test -q cli::test --bin stores
+stores test matrix --mode lab --catalog smoke --ci --report json
+stores test matrix --mode lab --catalog queue --ci --report json
+stores test matrix --mode lab --catalog battlescars --ci --report json
+stores test matrix --mode lab --catalog upstream --ci --report json
+stores test matrix --mode lab --catalog full --ci --report json
+stores test enumerate --catalog full --coverage
+stores test matrix prune --keep-last 20
+stores test matrix --mode current --only git-stale-base-refuses \
+  --watch --i-understand-this-mutates-current-repo
+```
+
+Acceptance criteria:
+
+- No real LLM calls in any matrix validation.
+- All intended rows PASS or are explicitly waived; no accidental SKIP.
+- No ERROR.
+- Artifact bundles exist for every executable row.
+- Coverage report has no unwaived required gaps.
+- Current-mode stale-base proof remains GREEN, emits typed `NeedsReview`, finalizes locks, and does not wedge.
+- Current-mode run artifacts document task id, marker commit, DB backup, no-LLM proof, and cleanup/deactivation instructions.
+- Working tree is clean after validation except intentional current-mode marker commits/artifacts documented by the run.
+
+Non-goals: no merge train, no eager re-review of queued-behind tasks, no broad product UX polish beyond diagnostic reports/artifacts.
+
+Ordering: Phase F, then G, then H, then I, then J. If a phase reveals a real product bug, keep the row as FAIL/useful RED only while fixing that same phase; do not advance to the next phase until the phase done_when is met or a documented waiver is added by a later explicit waiver gate.
 
 ### Batch A — Fix current RED and queue protocol foundation
 
